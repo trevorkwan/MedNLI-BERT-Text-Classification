@@ -173,95 +173,123 @@ def get_search_space(param_name):
     }
     return search_space[param_name]
 
-# define the hyperparameter optimization function
-def objective(trial, data_args, training_args, logger, tokenizer, last_checkpoint, preprocess_function, compute_metrics, model, data_collator, get_search_space, clean_datasets):
-
-    # set attributes for early stopping patience
+def initialize_training_args(training_args):
     setattr(training_args, "load_best_model_at_end", True)
     setattr(training_args, "evaluation_strategy", "steps")
     setattr(training_args, "save_strategy", "steps")
     setattr(training_args, "metric_for_best_model", "eval_loss")
     setattr(training_args, "eval_steps", 200)
+    return training_args
 
-    # get the hyperparameters to try from the search space (feeds new params into the trainer)
-    learning_rate = trial.suggest_loguniform("learning_rate", *get_search_space("learning_rate")) # e.g. trial.suggest_loguniform() accesses the trainer object and modifies its learning rate
+def get_hyperparameters(trial, get_search_space, logger):
+    learning_rate = trial.suggest_loguniform("learning_rate", *get_search_space("learning_rate"))
     per_device_train_batch_size = trial.suggest_int("per_device_train_batch_size", *get_search_space("per_device_train_batch_size"))
     num_train_epochs = trial.suggest_int("num_train_epochs", *get_search_space("num_train_epochs"))
-    max_seq_length = trial.suggest_int("max_seq_length", *get_search_space("max_seq_length"), step = 64)
+    max_seq_length = trial.suggest_int("max_seq_length", *get_search_space("max_seq_length"), step=64)
     weight_decay = trial.suggest_loguniform("weight_decay", *get_search_space("weight_decay"))
-
-    logger.info(f"Starting trial {trial.number} with learning_rate = {learning_rate: .5f}, per_device_train_batch_size = {per_device_train_batch_size}, num_train_epochs = {num_train_epochs}, max_seq_length = {max_seq_length}, weight_decay = {weight_decay: .5f}.")
     
-    # if max_seq_length is greater than the max allowed length for the tokenizer, gives a warning... 
-    if max_seq_length > tokenizer.model_max_length: 
-        logger.warning(
-        f"The max_seq_length passed ({max_seq_length}) is larger than the maximum length for the"
-        f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
-    )
-    max_seq_length = min(max_seq_length, tokenizer.model_max_length) # ...and sets the max_seq_length to the max allowed length for tokenizer
+    logger.info(f"Starting trial {trial.number} with learning_rate = {learning_rate:.5f}, per_device_train_batch_size = {per_device_train_batch_size}, num_train_epochs = {num_train_epochs}, max_seq_length = {max_seq_length}, weight_decay = {weight_decay:.5f}.")
+    
+    return learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay
 
-    # preprocess the clean datasets into tokens
-    with training_args.main_process_first(desc="dataset map pre-processing"): # desc is a description string, .main_process_first ensures that code within it is executed only on the main process during distributed training
-        clean_datasets = clean_datasets.map( # maps the pre-process function (tokenizer) to batches of input examples of data
+def check_max_seq_length(max_seq_length, tokenizer, logger):
+    if max_seq_length > tokenizer.model_max_length:
+        logger.warning(
+            f"The max_seq_length passed ({max_seq_length}) is larger than the maximum length for the"
+            f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
+        )
+        max_seq_length = min(max_seq_length, tokenizer.model_max_length)
+    return max_seq_length  
+
+def preprocess_datasets(clean_datasets, max_seq_length, preprocess_function, training_args):
+    with training_args.main_process_first(desc="dataset map pre-processing"):
+        clean_datasets = clean_datasets.map(
             lambda examples: preprocess_function(examples, max_seq_length),
             batched=True,
-            load_from_cache_file=True, # load data from a cache file (speeds up dataset loading times)
-            desc="Running tokenizer on dataset", # desc is description string 
+            load_from_cache_file=True,
+            desc="Running tokenizer on dataset",
         )
+    return clean_datasets
 
-    # get train dataset
+def get_train_subsets(clean_datasets, data_args, training_args):
     train_dataset = clean_datasets["train"]
     if data_args.max_train_samples is not None:
-        max_train_samples = min(len(train_dataset), data_args.max_train_samples) # set max_train_samples to .max_train_samples, or to all the training samples
-        train_dataset = train_dataset.select(range(max_train_samples)) # subsets train dataset to only max_train_samples, gives the same subset everytime because we set.seed() before shuffling + selecting
+        max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+        train_dataset = train_dataset.select(range(max_train_samples))
 
-    short_train = train_dataset.select(range(int(training_args.train_subset_perc*len(train_dataset)))) # subset train data for hyperparam optimization (default is 20%)
-    
-    # get validation dataset
+    short_train = train_dataset.select(range(int(training_args.train_subset_perc * len(train_dataset))))
+    return train_dataset, short_train
+
+def get_eval_subsets(clean_datasets, data_args, training_args):
     eval_dataset = clean_datasets["validation"]
     if data_args.max_eval_samples is not None:
-        max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples) # set max_eval_samples if needed
-        eval_dataset = eval_dataset.select(range(max_eval_samples)) # subset eval dataset if needed, gives the same subset everytime because we set.seed() before shuffling + selecting
+        max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
+        eval_dataset = eval_dataset.select(range(max_eval_samples))
 
-    short_eval = eval_dataset.select(range(int(training_args.eval_subset_perc*len(eval_dataset)))) # subset validation data for hyperparam optimization (default is 20%)
+    short_eval = eval_dataset.select(range(int(training_args.eval_subset_perc * len(eval_dataset))))
+    return eval_dataset, short_eval
 
-    # Initialize our Trainer (with subset of train/eval data)
+def get_subsets(clean_datasets, data_args, training_args):
+    train_dataset, short_train = get_train_subsets(clean_datasets, data_args, training_args)
+    eval_dataset, short_eval = get_eval_subsets(clean_datasets, data_args, training_args)
+    return train_dataset, short_train, eval_dataset, short_eval
+
+def train_and_evaluate(trial, data_args, training_args, logger, tokenizer, last_checkpoint, preprocess_function, compute_metrics, model, data_collator, get_search_space, clean_datasets):
+    training_args = initialize_training_args(training_args)
+    
+    learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay = get_hyperparameters(trial, get_search_space, logger)
+    
+    max_seq_length = check_max_seq_length(max_seq_length, tokenizer, logger)
+    
+    clean_datasets = preprocess_datasets(clean_datasets, max_seq_length, preprocess_function, training_args)
+    
+    train_dataset, short_train, eval_dataset, short_eval = get_subsets(clean_datasets, data_args, training_args)
+    
     trainer = Trainer(
-        model=model, # pre-trained model to be fine-tuned
-        args=training_args, # contains arguments from TrainingArguments, including task_name
-        train_dataset=short_train, # pre-processed subset of training dataset (e.g. dict of lists of input_ids, attention_mask, token_type_ids, labels)
-        eval_dataset=short_eval, # pre-processed subset of validation dataset (e.g. dict of lists of input_ids, attention_mask, token_type_ids, labels)
-        compute_metrics=compute_metrics, # above function to evaluate metrics
-        tokenizer=tokenizer, # specifies the tokenizer to be used by the model to make predictions on new data (not to pre-process input data because you already did that in preprocess_function)
-        data_collator=data_collator, # specify the kind of data collator you want, default is `DataCollatorWithPadding` (see data_collator code above) (data collator is used to convert examples to batches)
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)] # training stops if there is no improvement for 3 consecutive evaluations (prevents overfitting)
+        model=model,
+        args=training_args,
+        train_dataset=short_train,
+        eval_dataset=short_eval,
+        compute_metrics=compute_metrics,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
-
-    # Training
+    
     logger.info(f"*** Training Trial {trial.number} ***")
+    
+    checkpoint = last_checkpoint if last_checkpoint is not None else training_args.resume_from_checkpoint
+    train_result = trainer.train(resume_from_checkpoint=checkpoint)
+    
+    metrics = train_result.metrics
 
-    checkpoint = None # init checkpoint
-    if training_args.resume_from_checkpoint is not None: # if resume_from_checkpoint
-        checkpoint = training_args.resume_from_checkpoint # sets the checkpoint to the path of a saved checkpoint
-    elif last_checkpoint is not None: 
-        checkpoint = last_checkpoint # sets checkpoint to path to last checkpoint
-    train_result = trainer.train(resume_from_checkpoint=checkpoint) # feeds checkpoint if avail, if not then starts from scratch
-    # during training, Trainer() updates the model's weights, and evaluates/validates model performance on training data after each epoch
-    # e.g. train_result = TrainingOutput(global_step = 1000, training_loss = 0.25, learning_rate = 0.001, epoch = 5, metrics = {"accuracy":0.85, "f1":0.83})
-    # global step: total # of training steps (one update of model weights) that were run, training_loss: avg training loss over all batches, learning_rate: learning rate used during training, epoch: # of epochs (epoch = 1 iteration on entire dataset) that were run, metrics: dict of training metrics
-    metrics = train_result.metrics # get metrics
-    metrics["train_samples"] = len(short_train) # put # of train samples key in metrics dictionary
+    metrics["train_samples"] = len(short_train)
 
-    # Evaluation
     logger.info(f"*** Evaluating Trial {trial.number} ***")
 
-    metrics = trainer.evaluate(eval_dataset=short_eval) # we loaded the metric to be accuracy
-    metrics["eval_samples"] = len(short_eval) # put # of valid samples as key in metrics dict
-    # e.g. {"accuracy":0.85, "eval_samples":500}
+    metrics = trainer.evaluate(eval_dataset=short_eval)
+    metrics["eval_samples"] = len(short_eval)
 
     logger.info(f"Trial {trial.number} finished with accuracy: {metrics['eval_accuracy']:.4f}.")
 
     return metrics["eval_accuracy"]
+
+# define the hyperparameter optimization function
+def objective(trial, data_args, training_args, logger, tokenizer, last_checkpoint, preprocess_function, compute_metrics, model, data_collator, get_search_space, clean_datasets):
+    return train_and_evaluate(
+        trial=trial,
+        data_args=data_args,
+        training_args=training_args,
+        logger=logger,
+        tokenizer=tokenizer,
+        last_checkpoint=last_checkpoint,
+        preprocess_function=preprocess_function,
+        compute_metrics=compute_metrics,
+        model=model,
+        data_collator=data_collator,
+        get_search_space=get_search_space,
+        clean_datasets=clean_datasets,
+    )
 
 def main():
     # See all possible arguments in src/transformers/training_args.py

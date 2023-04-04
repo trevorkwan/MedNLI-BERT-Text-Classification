@@ -96,6 +96,117 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 # Change the current working directory to the script directory
 os.chdir(script_dir)
 
+def set_logger_and_verbosity(training_args, logger=None):
+    """
+    Set up the logging configuration and verbosity levels for the main libraries used in the script.
+
+    Args:
+        training_args: A MyTrainingArguments object containing the training arguments for the script.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__) # creates a logger object with the "name" get_best_model, to identify where these logger messages are coming from
+    
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s", # log format
+        datefmt="%m/%d/%Y %H:%M:%S", # datetime format
+        handlers=[logging.StreamHandler(sys.stdout)], # where to send the log messages e.g. a file, the console
+    )
+    
+    logger.setLevel(logging.INFO) # set the logging level for the logger object for the entire script
+
+def load_raw_data(data_args):
+    """
+    Load raw data from specified train, validation, and test files.
+
+    Args:
+        data_args: A DataLoadingArguments object containing file paths for train, validation, and test data.
+
+    Returns:
+        train_med, eval_med, test_med: Lists containing raw training, validation, and test data.
+    """
+    train_med = [json.loads(line) for line in open('../data/raw/' + data_args.train_file, 'r')]
+    eval_med = [json.loads(line) for line in open('../data/raw/' + data_args.validation_file, 'r')]
+    test_med = [json.loads(line) for line in open('../data/raw/' + data_args.test_file, 'r')]
+    return train_med, eval_med, test_med
+
+def get_clean_data(data, max_samples=None):
+    """
+    Clean and preprocess data by removing extra whitespaces and creating data_list with sentence pairs and labels.
+
+    Args:
+        data: A list of raw data dictionaries containing 'sentence1', 'sentence2', and 'gold_label' keys.
+        max_samples (Optional[int]): The maximum number of samples to return from the data list. If not specified, all samples are returned.
+
+    Returns:
+        data_list: A list of dictionaries containing 'sentence1', 'sentence2', and 'label' keys.
+    """
+    s1 = [item['sentence1'].strip() for item in data] # .strip() removes whitespace from a string (e.g, spaces, tabs)
+    s2 = [item['sentence2'].strip() for item in data]
+    labels = [item['gold_label'] for item in data]
+
+    data_list = [{"sentence1": s1[i], "sentence2": s2[i], "label": labels[i]} for i in range(len(s1))]
+
+    if max_samples is not None:
+        max_samples = min(len(data_list), max_samples)
+        indices = list(range(len(data_list)))
+        random.shuffle(indices)
+        data_list = [data_list[i] for i in indices[:max_samples]]
+
+    return data_list
+
+def load_and_clean_data(data_args):
+    """
+    Load and clean/preprocess data from specified train, validation, and test files.
+
+    Args:
+        data_args: A DataLoadingArguments object containing file paths for train, validation, and test data.
+
+    Returns:
+        train_list, eval_list, test_list: Lists of cleaned and preprocessed training, validation, and test data.
+    """
+    logger.info(
+        f"Starting to load data from files: {data_args.train_file, data_args.validation_file, data_args.test_file}"
+    )
+
+    train_med, eval_med, test_med = load_raw_data(data_args)
+
+    train_list = get_clean_data(train_med, data_args.max_train_samples)
+    logger.info(f"Loading training data with sample size: {len(train_list)}.")
+
+    eval_list = get_clean_data(eval_med, data_args.max_eval_samples)
+    logger.info(f"Loading evaluation data with sample size: {len(eval_list)}.")
+
+    test_list = get_clean_data(test_med, data_args.max_test_samples)
+    logger.info(f"Loading testing data with sample size: {len(test_list)}.")
+
+    return train_list, eval_list, test_list
+
+def export_json(data, file_path):
+    """
+    Export data to a JSON file.
+
+    Args:
+        data: Data to be exported as JSON.
+        file_path: The path to the file where the JSON data will be saved.
+    """
+    with open(file_path, "w") as outfile:
+        json.dump(data, outfile)
+
+def export_clean_data(train_list, eval_list, test_list):
+    """
+    Export cleaned and preprocessed train, validation, and test data to JSON files.
+
+    Args:
+        train_list: A list of cleaned and preprocessed training data.
+        eval_list: A list of cleaned and preprocessed evaluation data.
+        test_list: A list of cleaned and preprocessed test data.
+    """
+    export_json(train_list, "../data/clean/clean_train_med.json")
+    export_json(eval_list, "../data/clean/clean_eval_med.json")
+    export_json(test_list, "../data/clean/clean_test_med.json")
+
+    logger.info(f"Finished exporting cleaned data as json files.")
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -105,119 +216,16 @@ def main():
     data_args, training_args = parser.parse_args_into_dataclasses()
 
     # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s", # log format
-        datefmt="%m/%d/%Y %H:%M:%S", # datetime format
-        handlers=[logging.StreamHandler(sys.stdout)], # where to send the log messages e.g. a file, the console
-    )
-    
-    transformers.utils.logging.set_verbosity_info() # sets log level to `INFO` or higher
-    log_level = training_args.get_process_log_level() # sets log_level to value specified in `training_args` object
-    logger.setLevel(log_level) # assigns it to the logger object
-    datasets.utils.logging.set_verbosity(log_level) # ensures that log messages emitted by datasets library are `log_level` or higher
-    transformers.utils.logging.set_verbosity(log_level) # ensures that log messages emitted by transformers library are `log_level` or higher
-    transformers.utils.logging.enable_default_handler() # enables default handler for transformers library
-    transformers.utils.logging.enable_explicit_format() # enables a different format for log messages
-    
-    # Set seed to get the same subset.
+    set_logger_and_verbosity(training_args)
+
+    # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    # load train + eval + test mednli_data as a list
-    logger.info(f"Starting to load data from files: {data_args.train_file, data_args.validation_file, data_args.test_file}") 
+    # load and clean data
+    train_list, eval_list, test_list = load_and_clean_data(data_args)
 
-    train_med = [json.loads(line) for line in open('../data/raw/' + data_args.train_file, 'r')]
-    eval_med = [json.loads(line) for line in open('../data/raw/' + data_args.validation_file, 'r')]
-    test_med = [json.loads(line) for line in open('../data/raw/' + data_args.test_file, 'r')]
-
-    # training data extract sentence1, sentence2, and label from list of dictionaries
-    train_s1 = [item['sentence1'] for item in train_med]
-    train_s1 = [x.strip() for x in train_s1] # .strip() removes whitespace from a string (e.g, spaces, tabs)
-    train_s2 = [item['sentence2'] for item in train_med]
-    train_s2 = [x.strip() for x in train_s2]
-    train_labels = [item['gold_label'] for item in train_med]
-
-    # create train list of dict
-    train_list = []
-    for i in range(len(train_s1)):
-        train_dict = {
-            "sentence1": train_s1[i],
-            "sentence2": train_s2[i],
-            "label": train_labels[i]
-        }
-        train_list.append(train_dict)
-    
-    # subset train if needed
-    if data_args.max_train_samples is not None:
-        max_train_samples = min(len(train_list), data_args.max_train_samples)
-        indices = list(range(len(train_list)))
-        random.shuffle(indices)
-        train_list = [train_list[i] for i in indices[:max_train_samples]]
-    
-    logger.info(f"Loading training data with sample size: {len(train_list)}.") 
-
-    # eval data extract sentence1, sentence2, and label from list of dictionaries
-    eval_s1 = [item['sentence1'] for item in eval_med]
-    eval_s1 = [x.strip() for x in eval_s1]
-    eval_s2 = [item['sentence2'] for item in eval_med]
-    eval_s2 = [x.strip() for x in eval_s2]
-    eval_labels = [item['gold_label'] for item in eval_med]
-
-    # create eval list of dict
-    eval_list = []
-    for i in range(len(eval_s1)):
-        eval_dict = {
-            "sentence1": eval_s1[i],
-            "sentence2": eval_s2[i],
-            "label": eval_labels[i]
-        }
-        eval_list.append(eval_dict)
-    
-    # subset eval if needed
-    if data_args.max_eval_samples is not None:
-        max_eval_samples = min(len(eval_list), data_args.max_eval_samples)
-        indices = list(range(len(eval_list)))
-        random.shuffle(indices)
-        eval_list = [eval_list[i] for i in indices[:max_eval_samples]]
-
-    logger.info(f"Loading evaluation data with sample size: {len(eval_list)}.") 
-
-    # test data extract sentence1, sentence2, and label from list of dictionaries
-    test_s1 = [item['sentence1'] for item in test_med]
-    test_s1 = [x.strip() for x in test_s1]
-    test_s2 = [item['sentence2'] for item in test_med]
-    test_s2 = [x.strip() for x in test_s2]
-    test_labels = [item['gold_label'] for item in test_med]
-
-    # create test list of dict
-    test_list = []
-    for i in range(len(test_s1)):
-        test_dict = {
-            "sentence1": test_s1[i],
-            "sentence2": test_s2[i],
-            "label": test_labels[i]
-        }
-        test_list.append(test_dict)
-    
-    # subset test if needed
-    if data_args.max_test_samples is not None:
-        max_test_samples = min(len(test_list), data_args.max_test_samples)
-        indices = list(range(len(test_list)))
-        random.shuffle(indices)
-        test_list = [test_list[i] for i in indices[:max_test_samples]]
-    
-    logger.info(f"Loading testing data with sample size: {len(test_list)}.") 
-
-    # export train/eval/test as .json
-    with open("../data/clean/clean_train_med.json", "w") as outfile:
-        json.dump(train_list, outfile)
-
-    with open("../data/clean/clean_eval_med.json", "w") as outfile:
-        json.dump(eval_list, outfile)
-
-    with open("../data/clean/clean_test_med.json", "w") as outfile:
-        json.dump(test_list, outfile)
-    
-    logger.info(f"Finished exporting cleaned data as json files.") 
+    # export data as json files
+    export_clean_data(train_list, eval_list, test_list) 
 
 def _mp_fn(index): # used in conjunction with the below code when running on TPUs, takes in `index` argument which is the process index used by `xla_spawn()`
     # For xla_spawn (TPUs)
