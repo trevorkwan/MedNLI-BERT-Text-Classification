@@ -96,7 +96,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 # Change the current working directory to the script directory
 os.chdir(script_dir)
 
-def set_logger_and_verbosity(training_args, logger=None):
+def set_logger_and_verbosity(logger=None):
     """
     Set up the logging configuration and verbosity levels for the main libraries used in the script.
 

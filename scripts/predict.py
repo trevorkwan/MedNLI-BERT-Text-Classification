@@ -1,9 +1,9 @@
 import logging # logs msgs/errors 
 import os # helps interact with operating system (e.g. read/write files, navigating files systems)
-# import random # helps generate random numbers
+import random # helps generate random numbers
 import sys # helps interact with operating system
 from dataclasses import dataclass, field # helps create functions that store data 
-from typing import Optional # Optional helps to specify that the param can also be None
+from typing import Optional, Tuple, List # Optional helps to specify that the param can also be None
 
 import datasets # can load datasets from hugging face
 # import evaluate # helps evaluate and compare models, and report their performance (released Dec, 2022)
@@ -59,7 +59,7 @@ class DataTrainingArguments:
     validation_file: Optional[str] = field( # specify path to validation data
         default=None, metadata={"help": "A csv or a json file containing the validation data."}
     )
-    predict_file: Optional[str] = field( # specify path to prediction data
+    test_file: Optional[str] = field( # specify path to prediction data
         default=None, metadata={"help": "A csv or a json file containing the test data."}
     )
 
@@ -128,249 +128,657 @@ class MyTrainingArguments(TrainingArguments):
         metadata = {"help": "whether or not to use mps device"}
     )
 
-def main():
+########################
+def parse_arguments():
+    """
+    Parses command line arguments into data classes for data, model, and training.
 
-    # takes command-line arguments and parses them into dataclasses -> data_args, model_args, training_args
+    Returns:
+        tuple: A tuple containing data_args, model_args, and training_args.
+    """
     parser = HfArgumentParser((DataTrainingArguments, ModelArguments, MyTrainingArguments))
     data_args, model_args, training_args = parser.parse_args_into_dataclasses()
+    return data_args, model_args, training_args
 
-    # set model/config path
-    setattr(model_args, "model_name_or_path", '../results/training')
+def setup_logging(training_args):
+    """
+    Configures logging settings for the script.
 
+    Args:
+        training_args (MyTrainingArguments): An instance of MyTrainingArguments containing the training arguments.
+
+    Returns:
+        logger (logging.Logger): A logger object for logging messages.
+    """
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    transformers.utils.logging.set_verbosity_info()
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    datasets.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.enable_default_handler()
+    transformers.utils.logging.enable_explicit_format()
+
+    logger.warning(
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+    )
+    logger.info(f"Training/evaluation parameters {training_args}")
+
+    return logger
+
+def detect_last_checkpoint(training_args):
+    """
+    Detects the last checkpoint if available in the output directory.
+
+    Args:
+        training_args (MyTrainingArguments): An instance of MyTrainingArguments containing the training arguments.
+
+    Returns:
+        str or None: The last checkpoint path if available, else None.
+    """
+    last_checkpoint = None
+    if os.path.isdir(training_args.output_dir) and not training_args.overwrite_output_dir:
+        last_checkpoint = get_last_checkpoint(training_args.output_dir)
+        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+            raise ValueError(
+                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+                "Use --overwrite_output_dir to overcome."
+            )
+        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+            logger.info(
+                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
+                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
+            )
+    return last_checkpoint
+
+def get_data_files(data_args):
+    """
+    Gets the data file paths for train, validation, and test sets.
+
+    Args:
+        data_args (DataTrainingArguments): An instance of DataTrainingArguments containing the data arguments.
+
+    Returns:
+        dict: A dictionary containing the file paths for train, validation, and test sets.
+    """
+    data_files = {
+        "train": "../data/clean/" + data_args.train_file,
+        "validation": "../data/clean/" + data_args.validation_file,
+        "test": "../data/clean/" + data_args.test_file,
+    }
+    return data_files
+
+def log_data_files(logger, data_files):
+    """
+    Logs the data file paths using the logger.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        data_files (dict): A dictionary containing the file paths for train, validation, and test sets.
+    """
+    for key in data_files.keys():
+        logger.info(f"load a local file for {key}: {data_files[key]}")
+
+
+def load_clean_datasets(logger, data_files, model_args, data_args):
+    """
+    Loads clean datasets from the provided data files.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        data_files (dict): A dictionary containing the file paths for train, validation, and test sets.
+        model_args (ModelArguments): An instance of ModelArguments containing the model arguments.
+        data_args (DataTrainingArguments): An instance of DataTrainingArguments containing the data arguments.
+
+    Returns:
+        datasets.DatasetDict: A dictionary containing the clean datasets for train, validation, and test sets.
+    """
+    logger.info(f"Loading clean datasets...")
+
+    if data_args.train_file.endswith(".csv"):
+        clean_datasets = load_dataset(
+            "csv",
+            data_files=data_files,
+            cache_dir=model_args.cache_dir,
+            use_auth_token=True if model_args.use_auth_token else None,
+        )
+    else:
+        clean_datasets = load_dataset(
+            "json",
+            data_files=data_files,
+            cache_dir=model_args.cache_dir,
+            use_auth_token=True if model_args.use_auth_token else None,
+        )
+    return clean_datasets
+
+def load_optimized_hyperparameters(filepath, logger):
+    """
+    Load optimized hyperparameters from a JSON file.
+
+    Args:
+        filepath (str): Path to the JSON file containing optimized hyperparameters.
+
+    Returns:
+        dict: A dictionary containing the optimized hyperparameters.
+    """
+    logger.info(f"Loading optimized hyperparameters from {filepath}...")
+
+    with open(filepath, "r") as f:
+        optimized_hyperparameters = json.load(f)
+    return optimized_hyperparameters
+
+def set_optimized_hyperparameters(logger, training_args, optimized_hyperparameters):
+    """
+    Set the optimized hyperparameters to the training arguments.
+
+    Args:
+        training_args (TrainingArguments): The training arguments containing training-related configurations.
+        optimized_hyperparameters (dict): A dictionary containing the optimized hyperparameters.
+
+    Returns:
+        TrainingArguments: The updated training arguments with optimized hyperparameters.
+    """
+    logger.info(f"Setting training_args attributes to optimized hyperparameter values...")
+
+    for k, v in optimized_hyperparameters.items():
+        if k == "best_hyperparameters":
+            for k2, v2 in v.items():
+                setattr(training_args, k2, v2)
+    return training_args
+
+def update_training_args_with_early_stopping(logger, training_args, clean_datasets):
+    """
+    Sets the training arguments to the suggested hyperparameter values and configures early stopping.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        training_args (MyTrainingArguments): An instance of MyTrainingArguments containing the training arguments.
+    Returns:
+        MyTrainingArguments: The updated instance of MyTrainingArguments with the suggested hyperparameter values.
+    """
+    logger.info(f"Setting training_args attributes to suggested values.")
+    
     # set attributes for early stopping patience
     setattr(training_args, "load_best_model_at_end", True)
     setattr(training_args, "evaluation_strategy", "steps")
     setattr(training_args, "save_strategy", "steps")
     setattr(training_args, "metric_for_best_model", "eval_loss")
-    setattr(training_args, "eval_steps", 200)
+    train_length = len(clean_datasets["train"])
+    setattr(training_args, "eval_steps", int(train_length/training_args.per_device_train_batch_size*0.55)) # total steps per epoch * 0.55 will let you evaluate the model 1 or 2 times per epoch
 
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s", # log format
-        datefmt="%m/%d/%Y %H:%M:%S", # datetime format
-        handlers=[logging.StreamHandler(sys.stdout)], # where to send the log messages e.g. a file, the console
-    )
+    return training_args
 
-    transformers.utils.logging.set_verbosity_info() # sets log level to `INFO` or higher
-    log_level = training_args.get_process_log_level() # sets log_level to value specified in `training_args` object
-    logger.setLevel(log_level) # assigns it to the logger object
-    datasets.utils.logging.set_verbosity(log_level) # ensures that log messages emitted by datasets library are `log_level` or higher
-    transformers.utils.logging.set_verbosity(log_level) # ensures that log messages emitted by transformers library are `log_level` or higher
-    transformers.utils.logging.enable_default_handler() # enables default handler for transformers library
-    transformers.utils.logging.enable_explicit_format() # enables a different format for log messages
+def get_label_information(logger, clean_datasets: datasets.DatasetDict) -> Tuple[List[str], int]:
+    """
+    Gets label information, including the unique labels and the number of labels.
 
-    # Log on each process the small summary:
-    logger.warning( # warning message with info about process rank, # of gpus being used, etc.
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
-    )
-    logger.info(f"Training/evaluation parameters {training_args}") # log message of all the params needed for training and evaluation
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        clean_datasets (datasets.DatasetDict): A dictionary containing the clean datasets for train, validation, and test sets.
 
-    # Detecting last checkpoint.
-    last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and not training_args.overwrite_output_dir: # if there is a prior output directory, and overwrite_output_dir = False, then it tries to find last checkpoint saved in the directory
-        last_checkpoint = get_last_checkpoint(training_args.output_dir) # gets the last checkpoint in that output directory
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0: # raises an error if no checkpoint is found and there are files in the output directory
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None: # if checkpoint is found but resume_from_checkpoint is not set, tells the user it will go ahead and resume from latest checkpoint
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
+    Returns:
+        tuple: A tuple containing a sorted list of unique labels and the number of labels.
+    """
+    logger.info(f"Getting label information...")
 
-    # Set seed before initializing model.
-    set_seed(training_args.seed)
+    label_list = clean_datasets["train"].unique("label")
+    label_list.sort()
+    num_labels = len(label_list)
+    return label_list, num_labels
 
-    # get best hyperparameters
-    with open("../results/hyperparameter_optimization/optimized_hyperparameters.json", "r") as f:
-        optimized_hyperparameters = json.load(f)
+def load_config_tokenizer_model(logger, model_args, num_labels):
+    """
+    Loads the pre-trained configuration, tokenizer, and model.
 
-    # load best_hyperparameters into training_args
-    for k, v in optimized_hyperparameters.items():
-        if k == "best_hyperparameters":
-            for k2, v2 in v.items():
-                setattr(training_args, k2, v2)
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        model_args (ModelArguments): An instance of ModelArguments containing the model arguments.
+        num_labels (int): The number of unique labels in the dataset.
 
-    # get dataset file paths from your own local files. csv/json training/evaluation files are needed
-    data_files = {"train": '../data/clean/' + data_args.train_file, "validation": '../data/clean/' + data_args.validation_file, "predict": '../data/clean/' + data_args.predict_file} # file paths to train and validation data, `data_files` is a dictionary with keys
+    Returns:
+        tuple: A tuple containing the configuration, tokenizer, and model objects.
+    """
+    logger.info(f"Loading pre-trained config, tokenizer, and model...")
 
-    for key in data_files.keys(): # logs file paths for "train", "validation" in `data_files`
-        logger.info(f"load a local file for {key}: {data_files[key]}")
-
-    # load dataset from csv files
-    if data_args.train_file.endswith('.csv'):
-        clean_datasets = load_dataset(
-            "csv", # file extension as first argument
-            data_files = data_files, # train/valid/test paths are passed here
-            cache_dir = model_args.cache_dir, # cache_dir specifies path to directory where downloaded datasets will be cached
-            use_auth_token = True if model_args.use_auth_token else None, # authenticates user
-        )
-    # load dataset from json files
-    else:
-        clean_datasets = load_dataset(
-            "json", # file extension as first argument
-            data_files=data_files, # train/valid/test file paths are passed here
-            cache_dir=model_args.cache_dir, # directory where datasets will be cached
-            use_auth_token=True if model_args.use_auth_token else None, # authenticates user
-        )
-    
-    # labels
-    label_list = clean_datasets["train"].unique("label") # e.g. array([0,2,1])
-    label_list.sort()  # e.g. array([0,1,2]) sort it for determinism (to make the results consistent and reproducible when the order of label_list is the same every time)
-    num_labels = len(label_list) # e.g. "3"
-
-    # load fine-tuned model and tokenizer
     config = AutoConfig.from_pretrained(
-        model_args.config_name if model_args.config_name else model_args.model_name_or_path, # if .config_name is not None, then pretrained_model_name_or_path = .config_name, else pretrained_model_name_or_path = .model_name_or_path
-        num_labels=num_labels, # # of classes
-        finetuning_task = "text-classification", # specify the task that the pre-trained model will be fine-tuned on
-        cache_dir=model_args.cache_dir, # where pre-trained model will be stored/cached
-        revision=model_args.model_revision, # specific model version to use e.g. `abcdefg1234567`
-        use_auth_token=True if model_args.use_auth_token else None, # necessary if pre-trained model config is hosted on private model hub like huggingface hub 
+        model_args.config_name if model_args.config_name else model_args.model_name_or_path,
+        num_labels=num_labels,
+        finetuning_task="text-classification",
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path, # if .tokenizer_name is not None, then pretrained_model_name_or_path = .tokenizer_name, else pretrained_model_name_or_path = .model_name_or_path
-        cache_dir=model_args.cache_dir, # where to cache/store the downloaded tokenizer
-        use_fast=model_args.use_fast_tokenizer, # whether or not to use fast tokenizer
-        revision=model_args.model_revision, # e.g. `abcdefg1234567`
-        use_auth_token=True if model_args.use_auth_token else None, # necessary if tokenizer is hosted on a private model hub like huggingface hub
+        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        use_fast=model_args.use_fast_tokenizer,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
     )
     model = AutoModelForSequenceClassification.from_pretrained(
-        model_args.model_name_or_path, # pretrained_model_name_or_path = .model_name_or_path
-        from_tf=bool(".ckpt" in model_args.model_name_or_path), # specifies if pre-trained model was original saved in tensorflow format (necessary if it was saved in tf format and pytorch version of model is being loaded)
-        config=config, # the config object from AutoConfig.from_pretrained()
-        cache_dir=model_args.cache_dir, # specifies directory where pre-trained model will be cached/stored
-        revision=model_args.model_revision, # e.g. `abcdefg1234567`
-        use_auth_token=True if model_args.use_auth_token else None, # necessary if pre-trained model is hosted on a private model hub like huggingface hub
-        ignore_mismatched_sizes=model_args.ignore_mismatched_sizes, # whether to ignore size mismatches between pre-trained model and config object here, default = False
+        model_args.model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        config=config,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
+        ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
     )
+    return config, tokenizer, model
 
-        # preprocess the clean datasets (identifying the relevant columns)
-    non_label_column_names = [name for name in clean_datasets["train"].column_names if name != "label"] # get the non-label column names
-    if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names: # if your non-label column names are "sentence1" and "sentence2", then assumes that there are your non-label column names and assigns them to sentence1_key and sentence2_key
+def get_max_seq_length(max_seq_length, tokenizer, logger):
+    """
+    Args:
+        max_seq_length (int): the max allowed length for the tokenizer
+        tokenizer (transformers.tokenization_utils_base.PreTrainedTokenizerBase): the tokenizer
+        logger (logging.Logger): the logger
+
+    Returns:
+        max_seq_length (int): the max allowed length for the tokenizer
+    """
+    logger.info(f"Getting max_seq_length...")
+
+    if max_seq_length > tokenizer.model_max_length: # if max_seq_length is greater than the max allowed length for the tokenizer, gives a warning... 
+        logger.warning(
+            f"The max_seq_length passed ({max_seq_length}) is larger than the maximum length for the"
+            f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
+        )
+        max_seq_length = min(max_seq_length, tokenizer.model_max_length) # ...and sets the max_seq_length to the max allowed length for tokenizer
+    return max_seq_length 
+ 
+def get_non_label_column_names(logger, clean_datasets):
+    """
+    Gets the column names in the dataset that are not 'label'.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        clean_datasets (datasets.DatasetDict): A dictionary containing the clean datasets for train, validation, and test sets.
+
+    Returns:
+        list: A list of column names that are not 'label'.
+    """
+    logger.info(f"Getting non_label_column_names...")
+
+    non_label_column_names = [name for name in clean_datasets["train"].column_names if name != "label"]
+    return non_label_column_names
+
+def get_sentence_keys(logger, non_label_column_names):
+    """
+    Gets the sentence1_key and sentence2_key based on the non_label_column_names.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        non_label_column_names (list): A list of column names that are not 'label'.
+
+    Returns:
+        tuple: A tuple containing the sentence1_key and sentence2_key.
+    """
+    logger.info(f"Getting sentence1_key, sentence2_key...")
+
+    if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names:
         sentence1_key, sentence2_key = "sentence1", "sentence2"
     else:
-        if len(non_label_column_names) >= 2: # if non-label column names are NOT "sentence1" and "sentence2", then it checks if there are >= 2 non-label columns
-            sentence1_key, sentence2_key = non_label_column_names[:2] # sets first 2 non-label column names as sentence1_key and sentence2_key (because [:2] is 0,1 elements, excluding 2)
+        if len(non_label_column_names) >= 2:
+            sentence1_key, sentence2_key = non_label_column_names[:2]
         else:
-            sentence1_key, sentence2_key = non_label_column_names[0], None # if there are < 2 non-label columns, 1 non-label column name is set to sentence1_key, and sentence2_key = None
-    
-    # Some models have set the order of the labels to use, so let's make sure we do use it. 
-    # Overall, the below code ensures that the labels/ordering used in pre-trained model's config matches labels/ordering in training data
-    # "label to id" means you map each possible label to a unique ID
-    label_to_id = None 
-    if (config.label2id != PretrainedConfig(num_labels=num_labels).label2id): # e.g. default PretrainedConfig().label2id mapping -> {0:'LABEL_0', 1:'LABEL_1', 2:'LABEL_2'}, e.g.model.config.label2id -> {"NEUTRAL": 0, "CONTRADICTION": 1, "ENTAILMENT": 2})
-        # Some have all caps in their config, some don't.
-        label_name_to_id = {k.lower(): v for k, v in config.label2id.items()} # make the label keys lowercase in model.config: for k, v in model.config.label2id.items() -> e.g. for k, v in [("NEUTRAL", 0), ("CONTRADICTION", 1), ("ENTAILMENT", 2)], `label_name_to_id` = {k.lower(): v} as a dictionary -> {neutral:0, contradiction:1, entailment:2}
-        if list(sorted(label_name_to_id.keys())) == list(sorted(label_list)): # e.g. sorted(label_name_to_id.keys()) = ["contradiction", "entailment", "neutral"], e.g. sorted(label_list) = ["contradiction", "entailment", "neutral"]
-            label_to_id = {i: int(label_name_to_id[label_list[i]]) for i in range(num_labels)} # e.g. if `label_list` = [entailment, neutral, contradiction], then `label_to_id` = {0:label_name_to_id["entailment"], 1:label_name_to_id["neutral"], 2:label_name_to_id["contradiction"]} -> = {0:2, 1:0, 2:1} ("0 is the entailment in training label_list while 2 is the entailment in model.config labels")
-            # e.g. label_to_id = {0:2, 1:0, 2:1}, where training label "0" maps to model.config label "2"
+            sentence1_key, sentence2_key = non_label_column_names[0], None
+    return sentence1_key, sentence2_key
+
+def get_label_to_id(logger, config, num_labels, label_list):
+    """
+    Gets the mapping of labels to IDs.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        config (PretrainedConfig): The pre-trained model configuration.
+        num_labels (int): The number of unique labels in the dataset.
+        label_list (list): A list of unique labels.
+
+    Returns:
+        dict: A dictionary containing the mapping of labels to IDs.
+    """
+    logger.info(f"Getting label_to_id...")
+
+    # this function is necessary because the label IDs are used internally by the model during training, but the label names are used externally to interpret the model's predictions.
+    # it makes sure that the internal representations match the external representations
+    label_to_id = None
+    if (config.label2id != PretrainedConfig(num_labels=num_labels).label2id):
+        label_name_to_id = {k.lower(): v for k, v in config.label2id.items()}
+        if list(sorted(label_name_to_id.keys())) == list(sorted(label_list)):
+            label_to_id = {i: int(label_name_to_id[label_list[i]]) for i in range(num_labels)}
         else:
             logger.warning(
                 "Your model seems to have been trained with labels, but they don't match the dataset: ",
                 f"model labels: {list(sorted(label_name_to_id.keys()))}, dataset labels: {list(sorted(label_list))}."
                 "\nIgnoring the model labels as a result.",
             )
-    label_to_id = {v: i for i, v in enumerate(label_list)} # e.g. label_to_id = {entailment:0, neutral:1, contradiction:2}
-    
-    # padding strategy
-    padding = "max_length" # will pad all samples to `max_seq_length`
+    label_to_id = {v: i for i, v in enumerate(label_list)}
+    return label_to_id
 
-    # preprocesses clean data into tokens to input into the model
-    def preprocess_function(examples, max_seq_length): 
-        """
-        takes a batch of examples and tokenizes them 
-        with padding (make sure input seq are the same length), 
-        max_seq_length (determines the max length of tokenized sequences), 
-        and truncation (truncate/shortens sequences that are longer than max_seq_length).
-        """
-        # Tokenize the texts
-        args = (
-            (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key]) 
-        )
-        result = tokenizer(*args, padding=padding, max_length=max_seq_length, truncation=True) # tokenizer() takes input examples sentence1 and sentence2 and -> {'input_ids':[101, 1996, 4248, 2829, 4419, 0, 0], 'attention_mask':[1,1,1,1,1,0,0], 'token_type_ids':[0,0,0,1,1,0,0]}
-        # e.g. examples[sentence1_key] = ['The cat in the hat.', 'The fox in the shoe.', 'The dwarf in the mug.'] (this is a list of sentence1's for a given batch)
-        # e.g. examples[sentence2_key] = ['The dog in the mut.', 'The woof in the bark.', 'The giant in the cave.'] (this is a list of sentence2's for a given batch)
-        # tokenizer from AutoTokenizer.from_pretrained() above
+def preprocess_clean_datasets(logger, clean_datasets, config, num_labels, label_list):
+    """
+    Preprocesses the clean datasets and gets the sentence keys and label_to_id mapping.
 
-        # Map labels to IDs (not necessary for GLUE tasks)
-        if label_to_id is not None and "label" in examples:
-            result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]] # e.g. for l in examples["label"] = [0,1,2,0,2,1,1]. checks that the label is not unknown (-1 represents unknown or NaN)
-        return result # e.g. results for a batch of 2 sentence pair examples {'input_ids':[[101, 1996, 4248, 2829, 4419, 0, 0], [92, 903, 384, 2700, 0, 0, 0]]'attention_mask':[[1,1,1,1,1,0,0],[1,1,1,1,0,0,0]], 'token_type_ids':[[0,0,0,1,1,0,0],[0,0,1,1,0,0,0]], 'label':[1,0]}
-    
-        # if max_seq_length is greater than the max allowed length for the tokenizer, gives a warning... 
-    if training_args.max_seq_length > tokenizer.model_max_length: 
-        logger.warning(
-        f"The max_seq_length passed ({training_args.max_seq_length}) is larger than the maximum length for the"
-        f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        clean_datasets (datasets.DatasetDict): A dictionary containing the clean datasets for train, validation, and test sets.
+        config (PretrainedConfig): The pre-trained model configuration.
+        num_labels (int): The number of unique labels in the dataset.
+        label_list (list): A list of unique labels.
+
+    Returns:
+        tuple: A tuple containing the sentence1_key, sentence2_key, and label_to_id mapping.
+    """
+    logger.info(f"Preprocessing clean datasets...")
+
+    non_label_column_names = get_non_label_column_names(logger, clean_datasets)
+    sentence1_key, sentence2_key = get_sentence_keys(logger, non_label_column_names)
+    label_to_id = get_label_to_id(logger, config, num_labels, label_list)
+    return sentence1_key, sentence2_key, label_to_id
+
+# preprocesses clean data into tokens to input into the model
+def preprocess_tokenize_function(example, max_seq_length, sentence1_key, sentence2_key, label_to_id, tokenizer): 
+    """
+    Preprocesses and tokenizes a single example.
+
+    Args:
+        example (dict): A single example from the dataset.
+        max_seq_length (int): The maximum sequence length allowed.
+        sentence1_key (str): The key for the first sentence in the example.
+        sentence2_key (str): The key for the second sentence in the example, if applicable.
+        label_to_id (dict): A dictionary containing the mapping of labels to IDs.
+        tokenizer (PreTrainedTokenizer): The tokenizer to be used for tokenization.
+
+    Returns:
+        dict: A dictionary containing the tokenized input IDs, attention masks, token type IDs, and label IDs.
+    """
+    # Tokenize the texts
+    args = (
+        (example[sentence1_key],) if sentence2_key is None else (example[sentence1_key], example[sentence2_key]) 
     )
-    max_seq_length = min(training_args.max_seq_length, tokenizer.model_max_length) # ...and sets the max_seq_length to the max allowed length for tokenizer
+    result = tokenizer(*args, padding="max_length", max_length=max_seq_length, truncation=True) # tokenizer() takes input example sentence1 and sentence2 and -> {'input_ids':[101, 1996, 4248, 2829, 4419, 0, 0], 'attention_mask':[1,1,1,1,1,0,0], 'token_type_ids':[0,0,0,1,1,0,0]}
+    # e.g. example[sentence1_key] = ['The cat in the hat.', 'The fox in the shoe.', 'The dwarf in the mug.'] (this is a list of sentence1's for a given batch)
+    # e.g. example[sentence2_key] = ['The dog in the mut.', 'The woof in the bark.', 'The giant in the cave.'] (this is a list of sentence2's for a given batch)
 
-    # preprocess the clean datasets into tokens
-    with training_args.main_process_first(desc="dataset map pre-processing"): # desc is a description string, .main_process_first ensures that code within it is executed only on the main process during distributed training
-        clean_datasets = clean_datasets.map( # maps the pre-process function (tokenizer) to batches of input examples of data
-            lambda examples: preprocess_function(examples, max_seq_length),
+    # Map labels to IDs 
+    if label_to_id is not None and "label" in example:
+        result["label"] = [(label_to_id[l] if l != -1 else -1) for l in example["label"]] # e.g. for l in example["label"] = [0,1,2,0,2,1,1]. checks that the label is not unknown (-1 represents unknown or NaN)
+    return result # e.g. results for a batch of 2 sentence pair examples {'input_ids':[[101, 1996, 4248, 2829, 4419, 0, 0], [92, 903, 384, 2700, 0, 0, 0]]'attention_mask':[[1,1,1,1,1,0,0],[1,1,1,1,0,0,0]], 'token_type_ids':[[0,0,0,1,1,0,0],[0,0,1,1,0,0,0]], 'label':[1,0]}
+
+def preprocess_datasets(logger, clean_datasets, training_args, max_seq_length, sentence1_key, sentence2_key, label_to_id, tokenizer): # don't need to feed in example because it's a built in variable name used in the `map` method of hugging face datasets library used to represent an individual example of `clean_datasets`, which is a datasets library object
+    """
+    Applies the preprocess_tokenize_function to all examples in the clean datasets.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        clean_datasets (datasets.DatasetDict): A dictionary containing the clean datasets for train, validation, and test sets.
+        training_args (MyTrainingArguments): An instance of MyTrainingArguments containing the training arguments.
+        max_seq_length (int): The maximum sequence length allowed.
+        sentence1_key (str): The key for the first sentence in the examples.
+        sentence2_key (str): The key for the second sentence in the examples, if applicable.
+        label_to_id (dict): A dictionary containing the mapping of labels to IDs.
+        tokenizer (PreTrainedTokenizer): The tokenizer to be used for tokenization.
+
+    Returns:
+        datasets.DatasetDict: The preprocessed and tokenized datasets for train, validation, and test sets.
+    """
+    logger.info(f"Applying preprocess_tokenize_function to examples in clean datasets...")
+
+    with training_args.main_process_first(desc="dataset map pre-processing"):
+        clean_datasets = clean_datasets.map( # map applies a function to all the examples in a dataset
+            lambda example: preprocess_tokenize_function(example, max_seq_length, sentence1_key, sentence2_key, label_to_id, tokenizer), # takes in an example, and applies the preprocess function to it
             batched=True,
-            load_from_cache_file=True, # load data from a cache file (speeds up dataset loading times)
-            desc="Running tokenizer on dataset", # desc is description string 
+            load_from_cache_file=True,
+            desc="Running tokenizer on dataset",
         )
-    
-    # get train dataset
-    train_dataset = clean_datasets["train"]
+    return clean_datasets
 
-    # get the eval dataset
-    eval_dataset = clean_datasets["validation"]
+def create_data_collator(logger, training_args, tokenizer):
+    """
+    Creates a data collator based on the training arguments and tokenizer.
 
-    # get the test dataset
-    predict_dataset = clean_datasets["predict"]
+    Args:
+        logger (logging.Logger): The logger to display information during the process.
+        training_args (TrainingArguments): The training arguments containing training-related configurations.
+        tokenizer (PreTrainedTokenizer): The tokenizer to be used in the data collator.
 
-    def compute_metrics(p: EvalPrediction): # p or EvalPrediction is a tuple with `predictions`: predicted probs of the model and `label_ids`: true labels
-        """
-        takes an `EvalPrediction` object (a namedtuple with a predictions and label_ids field)
-        and returns a dictionary with a single key value pair, e.g. {"accuracy": 0.85}
-        """
-        preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions # isinstance() checks if it is a tuple, this line extracts the model predicted probs
-        preds = np.argmax(preds, axis=1) # change pred format to be suitable for computing evaluation metrics
-        # np.argmax() gets the index of the highest probability class label predicted by model
-        return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()} # gets an array of True/False, .astype(np.float32) converts this to 1 or 0, then take the mean for accuracy
+    Returns:
+        DataCollator: The data collator to be used during training and evaluation.
+    """
+    logger.info(f"Creating data_collator...")
 
-    # Data collator will default to DataCollatorWithPadding when the tokenizer is passed to Trainer, so we change to default because we will already do the padding in preprocess_function
-    data_collator = default_data_collator # change to default data collator because we set `padding = "max_length" above``
-    if training_args.fp16: # if .fp16 = True (using float16 precision can speed up training by reducing memory requirements and allowing for larger batch sizes)
-        data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8) # pad to multiple of 8 because some hardware perform better when input sequences are padded to 8
+    data_collator = default_data_collator
+    if training_args.fp16:
+        data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
+    return data_collator
 
-    # create best trainer
-    best_trainer = Trainer(
-        model=model, # pre-trained model to be fine-tuned
-        args=training_args, # contains arguments from TrainingArguments, including task_name
-        train_dataset=train_dataset, # pre-processed training dataset (e.g. dict of lists of input_ids, attention_mask, token_type_ids, labels)
-        eval_dataset=eval_dataset, # pre-processed validation dataset (e.g. dict of lists of input_ids, attention_mask, token_type_ids, labels)
-        compute_metrics=compute_metrics, # above function to evaluate metrics
-        tokenizer=tokenizer, # specifies the tokenizer to be used by the model to make predictions on new data (not to pre-process input data because you already did that in preprocess_function)
-        data_collator=data_collator, # specify the kind of data collator you want, default is `DataCollatorWithPadding` (see data_collator code above) (data collator is used to convert examples to batches)
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)] # training stops if there is no improvement for 3 consecutive evaluations (prevents overfitting)
+def compute_metrics(p: EvalPrediction): # p or EvalPrediction is a tuple with `predictions`: predicted probs of the model and `label_ids`: true labels
+    """
+    Computes the accuracy of the predictions against the true labels.
+
+    Args:
+        p (EvalPrediction): A named tuple containing two fields: predictions and label_ids.
+
+    Returns:
+        Dict[str, float]: A dictionary with a single key-value pair representing the accuracy.
+    """
+    preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions # isinstance() checks if it is a tuple, this line extracts the model predicted probs
+    preds = np.argmax(preds, axis=1) # change pred format to be suitable for computing evaluation metrics
+    # np.argmax() gets the index of the highest probability class label predicted by model
+    return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()} # gets an array of True/False, .astype(np.float32) converts this to 1 or 0, then take the mean for accuracy
+
+def log_random_samples(logger, train_dataset, num_samples=3):
+    """
+    Logs a few random samples from the training set.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        train_dataset (datasets.Dataset): The pre-processed training dataset.
+        num_samples (int, optional): The number of random samples to log. Defaults to 3.
+    """
+    for index in random.sample(range(len(train_dataset)), num_samples):
+        logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
+
+def create_best_trainer(logger, model, training_args, train_dataset, eval_dataset, compute_metrics, tokenizer, data_collator):
+    """
+    Creates a Trainer instance with the best hyperparameters and early stopping callback.
+
+    Args:
+        model (PreTrainedModel): The pre-trained model to be fine-tuned.
+        training_args (TrainingArguments): An instance of TrainingArguments containing the training arguments.
+        train_dataset (datasets.Dataset): The pre-processed training dataset.
+        eval_dataset (datasets.Dataset): The pre-processed validation dataset.
+        compute_metrics (callable): A function to evaluate the model's metrics.
+        tokenizer (PreTrainedTokenizer): The tokenizer to be used by the model.
+        data_collator (DataCollator): The data collator to convert examples to batches.
+
+    Returns:
+        Trainer: The created Trainer instance.
+    """
+    logger.info(f"Creating Best Trainer")
+
+    return Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        compute_metrics=compute_metrics,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
     )
 
-    # Prediction (same as above validation code)
-    logger.info("*** Predicting on Full Dataset ***")
+def train_model(logger, best_trainer, train_dataset, last_checkpoint=None):
+    """
+    Trains the model using the best Trainer instance.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        best_trainer (Trainer): The best Trainer instance for model training.
+        train_dataset (datasets.Dataset): The pre-processed training dataset.
+        last_checkpoint (str, optional): The path to the last checkpoint from which to resume training. Defaults to None.
+
+    Returns:
+        dict: The training metrics.
+    """
+    logger.info("*** Training Full Dataset ***")
+    logger.info(f"Starting training with optimized hyperparameters: learning_rate = {best_trainer.args.learning_rate: .5f}, per_device_train_batch_size = {best_trainer.args.per_device_train_batch_size}, num_train_epochs = {best_trainer.args.num_train_epochs}, max_seq_length = {best_trainer.args.max_seq_length}, weight_decay = {best_trainer.args.weight_decay: .5f}.")
+
+    checkpoint = last_checkpoint if last_checkpoint is not None else best_trainer.args.resume_from_checkpoint
+    train_result = best_trainer.train(resume_from_checkpoint=checkpoint)
+
+    metrics = train_result.metrics
+    metrics["train_samples"] = len(train_dataset)
+
+    return metrics
+
+def save_trainer_state(logger, best_trainer, metrics):
+    """
+    Saves the trainer state, metrics, and model to disk.
+
+    Args:
+        best_trainer (Trainer): The best Trainer instance for model training.
+        metrics (dict): The training metrics.
+    """
+    logger.info(f"Saving trainer state, metrics, and model to disk...")
+                
+    best_trainer.save_model()
+    best_trainer.log_metrics("train", metrics)
+    best_trainer.save_metrics("train", metrics)
+    best_trainer.save_state()
+
+def get_fine_tuned_model_path(model_args, path):
+    """
+    Set the path for the model.
+
+    Args:
+        model_args: An instance of a model arguments class.
+        path: A string representing the path to the model.
+
+    Returns:
+        None
+    """
+    setattr(model_args, "model_name_or_path", path)
+
+######################
+
+def predict_on_test_dataset(logger, trainer, predict_dataset, label_list, output_dir):
+    """
+    Makes predictions on the full dataset and saves the results to a file.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        trainer (Trainer): A Trainer instance used for model training.
+        predict_dataset (Dataset): The dataset to make predictions on.
+        label_list (list): A list of label names to map prediction indices to label names.
+        output_dir (str): The directory where the prediction results file should be saved.
+
+    Returns:
+        None
+    """
+    logger.info("*** Predicting on Test Dataset ***")
 
     # Removing the `label` columns because it contains -1 and Trainer won't like that.
     predict_dataset = predict_dataset.remove_columns("label")
-    predictions = best_trainer.predict(predict_dataset, metric_key_prefix="predict").predictions # metric_key_prefix adds "predict_" to any metrics being logged, .predictions gets the predicted labels
-    predictions = np.argmax(predictions, axis=1) # use np.argmax() to convert raw logits of each class -> the index of the class with the highest predicted probs. 
+    predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
+    predictions = np.argmax(predictions, axis=1)
 
-    output_predict_file = os.path.join(training_args.output_dir, f"predict_results.txt") # e.g. if output_dir = "output", output_predict_file = "output/predict_results.txt"
-    if best_trainer.is_world_process_zero(): # checks if the current process is the master process
+    output_predict_file = os.path.join(output_dir, f"predict_results.txt")
+    if trainer.is_world_process_zero():
         with open(output_predict_file, "w") as writer:
-            logger.info(f"***** Writing predict results *****") # logs that predicted results are being written to disk
-            writer.write("index\tprediction\n") # writes a header line to the output file, e.g. "index" as the first column name and "prediction" as second column name in the output file
-            for index, item in enumerate(predictions): # enumerate allows you to access both the index and prediction value to be written to the output file
-            # for each row, re-write the output_predict_file with the index and predicted value
-                item = label_list[item] # e.g. label_list[1] -> "entailment"
-                writer.write(f"{index}\t{item}\n") # writes the output file with index number and classification predicted labels
+            logger.info(f"***** Writing predict results *****")
+            writer.write("index\tprediction\n")
+            for index, item in enumerate(predictions):
+                item = label_list[item]
+                writer.write(f"{index}\t{item}\n")
+
+def main():
+
+    # Parse arguments
+    data_args, model_args, training_args = parse_arguments()
+
+    # Get fine-tuned model path
+    get_fine_tuned_model_path(model_args, "../results/training")
+
+    # Setup logging
+    logger = setup_logging(training_args)
+
+    # Set seed before initializing model.
+    set_seed(training_args.seed)
+
+    # Get data files
+    data_files = get_data_files(data_args)
+
+    # Log data files
+    log_data_files(logger, data_files)
+
+    # Load clean datasets
+    clean_datasets = load_clean_datasets(logger, data_files, model_args, data_args)
+
+    # Load optimized hyperparameters (to load max_seq_length)
+    optimized_hyperparameters = load_optimized_hyperparameters("../results/hyperparameter_optimization/optimized_hyperparameters.json", logger)
+
+    # Set the optimized hyperparameters to the training arguments (to set max_seq_length)
+    training_args = set_optimized_hyperparameters(logger, training_args, optimized_hyperparameters)
+
+    # Get label information
+    label_list, num_labels = get_label_information(logger, clean_datasets)
+    
+    # Load pre-trained config, tokenizer, and model
+    config, tokenizer, model = load_config_tokenizer_model(logger, model_args, num_labels)
+
+    # Get max_seq_length
+    max_seq_length = get_max_seq_length(training_args.max_seq_length, tokenizer, logger)
+
+    # Get non_label_column_names
+    non_label_column_names = get_non_label_column_names(logger, clean_datasets)
+
+    # Get sentence1_key, sentence2_key
+    sentence1_key, sentence2_key = get_sentence_keys(logger, non_label_column_names)
+
+    # Get label_to_id
+    label_to_id = get_label_to_id(logger, config, num_labels, label_list)
+
+    # Preprocess clean datasets
+    sentence1_key, sentence2_key, label_to_id = preprocess_clean_datasets(logger, clean_datasets, config, num_labels, label_list)
+    
+    # Preprocess datasets by tokenizing and truncating
+    clean_datasets = preprocess_datasets(logger, clean_datasets, training_args, max_seq_length, sentence1_key, sentence2_key, label_to_id, tokenizer)
+
+    # Get train dataset
+    train_dataset = clean_datasets["train"]
+
+    # Get the eval dataset
+    eval_dataset = clean_datasets["validation"]
+
+    # Create data collator
+    data_collator = create_data_collator(logger, training_args, tokenizer)
+
+    # Log a few random samples from the training set
+    log_random_samples(logger, train_dataset)
+
+    # Create the best trainer using the fine-tuned model
+    best_trainer = create_best_trainer(logger,
+        model=model, # load the fine-tuned model
+        training_args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        compute_metrics=compute_metrics,
+        tokenizer=tokenizer,
+        data_collator=data_collator
+    )
+
+    # Get the predict dataset
+    predict_dataset = clean_datasets["test"]
+
+    # Predict on the test dataset and save the results to a file
+    predict_on_test_dataset(logger, best_trainer, predict_dataset, label_list, training_args.output_dir)
 
 def _mp_fn(index): # used in conjunction with the below code when running on TPUs, takes in `index` argument which is the process index used by `xla_spawn()`
     # For xla_spawn (TPUs)

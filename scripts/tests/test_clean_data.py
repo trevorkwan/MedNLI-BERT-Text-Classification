@@ -45,7 +45,7 @@ def test_set_logger_and_verbosity():
     training_args = MyTrainingArgumentsMock()
 
     # pass the custom logger to the function
-    set_logger_and_verbosity(training_args, custom_logger)
+    set_logger_and_verbosity(custom_logger)
 
     assert custom_logger.level == logging.INFO
 
