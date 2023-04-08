@@ -1,3 +1,28 @@
+
+import datasets
+import sys
+import logging
+import json
+import optuna
+
+from transformers import (
+    AutoConfig,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments
+)
+from transformers.trainer_utils import get_last_checkpoint
+from transformers.data.data_collator import DataCollatorWithPadding
+from transformers import EarlyStoppingCallback
+
+from utils.args_utils import *
+from utils.data_preprocessing_utils import *
+from utils.model_utils import *
+
+# need to set logger in helper function scripts
+logger = logging.getLogger(__name__)
+
 def create_study(logger):
     """
     Creates an Optuna study for hyperparameter optimization.
@@ -87,6 +112,85 @@ def update_training_args_with_hyperparams_and_early_stopping(logger, training_ar
     setattr(training_args, "max_seq_length", max_seq_length)
     setattr(training_args, "weight_decay", weight_decay)
     return training_args
+
+def train_and_evaluate(trial, data_args, model_args, training_args, logger, last_checkpoint, clean_datasets):
+    """
+    Trains and evaluates the model with the given hyperparameters and datasets.
+
+    Args:
+        trial (optuna.trial.Trial): An Optuna trial object that contains trial information and hyperparameters.
+        data_args (DataArguments): The data arguments containing dataset-related configurations.
+        model_args (ModelArguments): The model arguments containing model-related configurations.
+        training_args (TrainingArguments): The training arguments containing training-related configurations.
+        logger (logging.Logger): The logger to display information during the process.
+        last_checkpoint (str): The path to the last checkpoint from which to resume training.
+        clean_datasets (datasets.DatasetDict): The preprocessed and tokenized datasets for train, validation, and test sets.
+
+    Returns:
+        float: The accuracy of the model on the evaluation dataset.
+    """
+    
+    # get hyperparameters for the current trial
+    learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay = get_hyperparameters(trial, get_search_space, logger)
+    
+    # update training arguments with the trial hyperparameters
+    training_args = update_training_args_with_hyperparams_and_early_stopping(logger, training_args, learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay)
+
+    # get label information from the dataset
+    label_list, num_labels = get_label_information(logger, clean_datasets)
+
+    # load pre-trained config, tokenizer, and model
+    config, tokenizer, model = load_config_tokenizer_model(logger, model_args, num_labels)
+    
+    # update max_seq_length if it is too long for the tokenizer
+    max_seq_length = get_max_seq_length(max_seq_length, tokenizer, logger)
+
+    # preprocess datasets to get sentence1_key, sentence2_key, and label_to_id
+    sentence1_key, sentence2_key, label_to_id = preprocess_clean_datasets(logger, clean_datasets, config, num_labels, label_list)
+    
+    # preprocess datasets by tokenizing and truncating
+    clean_datasets = preprocess_datasets(logger, clean_datasets, training_args, max_seq_length, sentence1_key, sentence2_key, label_to_id, tokenizer)
+    
+    # get train and eval subsets
+    short_train, short_eval = get_subsets(logger, clean_datasets, data_args, training_args)
+
+    # create data collator for padding and batching
+    data_collator = create_data_collator(logger, training_args, tokenizer)
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=short_train,
+        eval_dataset=short_eval,
+        compute_metrics=compute_metrics,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+    )
+    
+    logger.info(f"*** Training Trial {trial.number} ***")
+    
+    # determine the checkpoint to resume training from
+    checkpoint = last_checkpoint if last_checkpoint is not None else training_args.resume_from_checkpoint
+
+    # train the model (fine-tune)
+    train_result = trainer.train(resume_from_checkpoint=checkpoint)
+    
+    # get training metrics
+    metrics = train_result.metrics
+    # store the number of training samples
+    metrics["train_samples"] = len(short_train)
+
+    logger.info(f"*** Evaluating Trial {trial.number} ***")
+
+    # evaluate the model
+    metrics = trainer.evaluate(eval_dataset=short_eval)
+    # store the number of evaluation samples
+    metrics["eval_samples"] = len(short_eval)
+
+    logger.info(f"Trial {trial.number} finished with accuracy: {metrics['eval_accuracy']:.4f}.")
+
+    return metrics["eval_accuracy"]
 
 # define the hyperparameter optimization function
 def objective(trial, data_args, model_args, training_args, logger, last_checkpoint, clean_datasets):

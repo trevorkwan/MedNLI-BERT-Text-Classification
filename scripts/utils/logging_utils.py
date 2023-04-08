@@ -22,7 +22,7 @@ def set_logger_and_verbosity(logger=None):
     
     logger.setLevel(logging.INFO) # set the logging level for the logger object for the entire script
 
-def setup_logging(training_args):
+def setup_logging(logger = None, training_args = None):
     """
     Configures logging settings for the script.
 

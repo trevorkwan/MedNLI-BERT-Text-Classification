@@ -10,6 +10,7 @@ from transformers import (
     AutoTokenizer,
     DataCollatorWithPadding,
     EarlyStoppingCallback,
+    EvalPrediction,
     Trainer,
     default_data_collator,
 )
@@ -54,6 +55,21 @@ def load_config_tokenizer_model(logger, model_args, num_labels):
         ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
     )
     return config, tokenizer, model
+
+def compute_metrics(p: EvalPrediction): # p or EvalPrediction is a tuple with `predictions`: predicted probs of the model and `label_ids`: true labels
+    """
+    Computes the accuracy of the predictions against the true labels.
+
+    Args:
+        p (EvalPrediction): A named tuple containing two fields: predictions and label_ids.
+
+    Returns:
+        Dict[str, float]: A dictionary with a single key-value pair representing the accuracy.
+    """
+    preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions # isinstance() checks if it is a tuple, this line extracts the model predicted probs
+    preds = np.argmax(preds, axis=1) # change pred format to be suitable for computing evaluation metrics
+    # np.argmax() gets the index of the highest probability class label predicted by model
+    return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()} # gets an array of True/False, .astype(np.float32) converts this to 1 or 0, then take the mean for accuracy
 
 def create_data_collator(logger, training_args, tokenizer):
     """

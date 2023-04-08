@@ -1,25 +1,133 @@
 from transformers import HfArgumentParser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from transformers.training_args import TrainingArguments
 
 
 @dataclass
-class DataTrainingArguments:
-    # Add your data-related arguments here, e.g.: data_dir: str
-    pass
+class DataLoadingArguments:
+    """
+    Arguments pertaining to what data we are going to input our model with for training and evaluation.
+    """
+
+    train_file: Optional[str] = field( # specify path to training data
+        default=None, metadata={"help": "A csv or a json file containing the training data."}
+    )
+    validation_file: Optional[str] = field( # specify path to validation data
+        default=None, metadata={"help": "A csv or a json file containing the validation data."}
+    )
+    test_file: Optional[str] = field( # specify path to testing data
+        default=None, metadata={"help": "A csv or a json file containing the test data."}
+    )
+    max_train_samples: Optional[int] = field( # used for quicker training
+        default=None,
+        metadata={
+            "help": (
+                "For debugging purposes or quicker training, truncates the number of training examples to this"
+            )
+        },
+    )
+    max_eval_samples: Optional[int] = field( # for quicker validation
+        default=None,
+        metadata={
+            "help": (
+                "For debugging purposes or quicker training, truncate the number of evaluation examples to this"
+            )
+        },
+    )
+    max_test_samples: Optional[int] = field( # for quicker testing
+        default=None,
+        metadata={
+            "help": (
+                "For debugging purposes or quicker training, truncate the number of predictions to this."
+            )
+        },
+    )
+
+    def __post_init__(self): # does additional checks after defining params
+        if self.train_file is None or self.validation_file is None or self.test_file is None:
+            raise ValueError("Need a training/validation/test file.")
+        else:
+            train_extension = self.train_file.split(".")[-1] # gets the document type e.g. "jsonl", makes sure that it is
+            assert train_extension in ["jsonl", "json"], "`train_file` should be a jsonl file or json file."
+            validation_extension = self.validation_file.split(".")[-1] # e.g. "jsonl". makes sure that it is
+            assert validation_extension == train_extension, "`validation_file` should have the same extension as `train_file`."
 
 
 @dataclass
 class ModelArguments:
     # Add your model-related arguments here, e.g.: model_name_or_path: str
-    pass
+    """
+    Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
+    """
+
+    model_name_or_path: Optional[str] = field( # path to pre-trained model
+        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    config_name: Optional[str] = field( # path/name to config of model if not the same as model_name
+        default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
+    )
+    tokenizer_name: Optional[str] = field( # path to pre-trained tokenizer if not the same as model_name
+        default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
+    )
+    cache_dir: Optional[str] = field( # specify where pretrained models downloaded from huggingface will be stored, if None, it will be cached in the default directory
+        default=None,
+        metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
+    )
+    use_fast_tokenizer: bool = field( # if True, will use a fast tokenizer from tokenizers library
+        default=True,
+        metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
+    )
+    model_revision: str = field( # specific version of model to use e.g. for `bert-base-uncased` you would use `abcdefg1234567`
+        default="main",
+        metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
+    )
+    use_auth_token: bool = field( # set to True to access private models, set to False to only access public models
+        default=False,
+        metadata={
+            "help": (
+                "Will use the token generated when running `huggingface-cli login` (necessary to use this script "
+                "with private models)."
+            )
+        },
+    )
+    ignore_mismatched_sizes: bool = field( # set to False to raise an error when head dimensions are different (between pretrained model and current model)
+        default=False,
+        metadata={"help": "Will enable to load a pretrained model whose head dimensions are different."},
+    )
 
 
 @dataclass
 class MyTrainingArguments(TrainingArguments):
-    # Add any custom training arguments here, or override the default ones
-    pass
+    """
+    My training arguments
+    """
+
+    seed: int = field(
+        default = 123,
+        metadata = {"help": "the seed to set"}
+    )
+    output_dir: str = field(
+        default=None,
+        metadata={"help": "specify output directory for parser"}
+    )
+    n_trials: int = field(
+        default = 100,
+        metadata = {"help": "the number of times to train and evaluate the model during hyperparameter optimization"}
+    )
+    train_subset_perc: float = field(
+        default = 0.2,
+        metadata = {"help": "the proportion of the max_train_samples of the full training data that you want to subset for hyperparameter optimization"}
+    )
+    eval_subset_perc: float = field(
+        default = 0.2,
+        metadata = {"help": "the proportion of the max_eval_samples of the full validation data that you want to subset for hyperparameter optimization"}
+    ) 
+    use_mps_device: bool = field(
+        default = True,
+        metadata = {"help": "whether or not to use mps device"}
+    )
+
 
 def parse_arguments():
     """
@@ -28,6 +136,6 @@ def parse_arguments():
     Returns:
         tuple: A tuple containing data_args, model_args, and training_args.
     """
-    parser = HfArgumentParser((DataTrainingArguments, ModelArguments, MyTrainingArguments))
+    parser = HfArgumentParser((DataLoadingArguments, ModelArguments, MyTrainingArguments))
     data_args, model_args, training_args = parser.parse_args_into_dataclasses()
     return data_args, model_args, training_args

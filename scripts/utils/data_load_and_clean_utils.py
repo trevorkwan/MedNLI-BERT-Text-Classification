@@ -4,6 +4,9 @@ import random
 import logging
 from datasets import load_dataset
 
+# need to set logger in helper function scripts
+logger = logging.getLogger(__name__)
+
 def load_raw_data(data_args):
     """
     Load raw data from specified train, validation, and test files.

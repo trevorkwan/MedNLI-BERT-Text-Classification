@@ -16,7 +16,8 @@ clean_data:
 	$(PYTHON) $(CLEAN_DATA_SCRIPT) --train_file mli_train_v1.jsonl \
                                 --validation_file mli_dev_v1.jsonl \
                                 --test_file mli_test_v1.jsonl \
-                                --output_dir ../data/clean/ 
+                                --output_dir ../data/clean/ \
+				--model_name_or_path None 
 
 optimize: 
 	$(PYTHON) $(OPTIMIZE_SCRIPT) --train_file clean_train_med.json \
