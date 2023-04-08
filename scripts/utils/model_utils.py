@@ -158,6 +158,29 @@ def save_trainer_state(logger, best_trainer, metrics):
     best_trainer.save_metrics("train", metrics)
     best_trainer.save_state()
 
+def get_fine_tuned_model_path(model_args, path):
+    """
+    Set the path for the model.
+
+    Args:
+        model_args: An instance of a model arguments class.
+        path: A string representing the path to the model.
+
+    Returns:
+        None
+    """
+    setattr(model_args, "model_name_or_path", path)
+
+def set_evaluation_metric(training_args, metric_name="eval_accuracy"):
+    """
+    Sets the metric_for_best_model attribute in the TrainingArguments instance.
+
+    Args:
+        training_args (TrainingArguments): An instance of TrainingArguments.
+        metric_name (str): The name of the metric to use for early stopping, default is "eval_accuracy".
+    """
+    training_args.metric_for_best_model = metric_name
+    
 def evaluate_test_dataset(logger, trainer, test_dataset):
     """
     Evaluates the model on the test dataset.
