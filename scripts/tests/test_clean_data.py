@@ -10,7 +10,7 @@ import pytest
 sys.path.append('../')
 
 # import functions to test from scripts.clean_data.py
-from clean_data import (
+from scripts.clean_data import (
     set_logger_and_verbosity,
     load_raw_data,
     get_clean_data,
@@ -71,16 +71,16 @@ def test_load_raw_data(tmpdir):
     train_file.write(json.dumps(train_data[0]) + "\n")  # Write only the first dictionary in train_data (so that load_raw_data can return train_med as a list of dictionary)
 
     # Update data_args to use the temporary file paths
-    data_args.train_file = os.path.relpath(str(train_file), '../data/raw/') # gets the relative path to "mli_train_v1.jsonl" from the ../data/raw/ directory
+    data_args.train_file = os.path.relpath(str(train_file), 'data/raw/') # gets the relative path to "mli_train_v1.jsonl" from the ../data/raw/ directory
 
     # Create temporary validation and test files (empty for this test)
     validation_file = data_dir.join("mli_validation_v1.jsonl")
     validation_file.write("")
-    data_args.validation_file = os.path.relpath(str(validation_file), '../data/raw/')
+    data_args.validation_file = os.path.relpath(str(validation_file), 'data/raw/')
 
     test_file = data_dir.join("mli_test_v1.jsonl")
     test_file.write("")
-    data_args.test_file = os.path.relpath(str(test_file), '../data/raw/')
+    data_args.test_file = os.path.relpath(str(test_file), 'data/raw/')
 
     # Test the load_raw_data function
     train_med, eval_med, test_med = load_raw_data(data_args)
@@ -119,13 +119,13 @@ def test_load_and_clean_data(monkeypatch):
     data_args = DataLoadingArgumentsMock()
 
     # Mock raw data loading and cleaning
-    monkeypatch.setattr("clean_data.load_raw_data", lambda _: ([], [], [])) # replaces `load_raw_data` with a lambda function that takes any input argument returns 3 empty lists (to simulate return raw data)
-    monkeypatch.setattr("clean_data.get_clean_data", lambda data, _: []) # lambda function that takes in data and _ ("_" is a placeholder for the second argument) and returns an empty list (to simulate return clean data)
+    monkeypatch.setattr("scripts.clean_data.load_raw_data", lambda _: ([], [], [])) # replaces `load_raw_data` with a lambda function that takes any input argument returns 3 empty lists (to simulate return raw data)
+    monkeypatch.setattr("scripts.clean_data.get_clean_data", lambda data, _: []) # lambda function that takes in data and _ ("_" is a placeholder for the second argument) and returns an empty list (to simulate return clean data)
 
     logger = MagicMock()
-    monkeypatch.setattr("clean_data.logger", logger)
+    monkeypatch.setattr("scripts.clean_data.logger", logger)
 
-    train_list, eval_list, test_list = load_and_clean_data(data_args)
+    train_list, eval_list, test_list = load_and_clean_data(logger, data_args)
 
     assert logger.info.call_count == 4 # assert that the logger.info function was called 4 times
     assert train_list == [] # assert that the returned train_list is an empty list
@@ -169,13 +169,13 @@ def test_export_clean_data(monkeypatch, tmpdir):
 
     # Mock JSON exporting function
     export_json_mock = MagicMock()
-    monkeypatch.setattr("clean_data.export_json", export_json_mock)
+    monkeypatch.setattr("scripts.clean_data.export_json", export_json_mock)
 
     # Mock logger object
     logger = MagicMock()
-    monkeypatch.setattr("clean_data.logger", logger)
+    monkeypatch.setattr("scripts.clean_data.logger", logger)
 
-    export_clean_data(train_list, eval_list, test_list) # tests if export_clean_data can take in 3 lists and export them as JSON files
+    export_clean_data(logger, train_list, eval_list, test_list) # tests if export_clean_data can take in 3 lists and export them as JSON files
 
     assert export_json_mock.call_count == 3 # assert that the export_json_mock function was called 3 times
     assert logger.info.called # assert that the logger.info function was called

@@ -1,13 +1,18 @@
-import os
 import json
 import random
 import logging
+import os
 from datasets import load_dataset
+from utils.args_utils import *
+from config import RAW_TRAIN_FILE, RAW_VALIDATION_FILE, RAW_TEST_FILE, CLEAN_DATA_DIR, CLEAN_TRAIN_FILE, CLEAN_VALIDATION_FILE, CLEAN_TEST_FILE
 
 # need to set logger in helper function scripts
 logger = logging.getLogger(__name__)
 
-def load_raw_data(data_args):
+# get args
+data_args, model_args, training_args = parse_arguments()
+
+def load_raw_data():
     """
     Load raw data from specified train, validation, and test files.
 
@@ -17,12 +22,12 @@ def load_raw_data(data_args):
     Returns:
         train_med, eval_med, test_med: Lists containing raw training, validation, and test data.
     """
-    train_med = [json.loads(line) for line in open('../data/raw/' + data_args.train_file, 'r')]
-    eval_med = [json.loads(line) for line in open('../data/raw/' + data_args.validation_file, 'r')]
-    test_med = [json.loads(line) for line in open('../data/raw/' + data_args.test_file, 'r')]
+    train_med = [json.loads(line) for line in open(RAW_TRAIN_FILE, 'r')]
+    eval_med = [json.loads(line) for line in open(RAW_VALIDATION_FILE, 'r')]
+    test_med = [json.loads(line) for line in open(RAW_TEST_FILE, 'r')]
     return train_med, eval_med, test_med
 
-def get_clean_data(data, max_samples=None):
+def get_clean_data(data, data_args, max_samples=None):
     """
     Clean and preprocess data by removing extra whitespaces and creating data_list with sentence pairs and labels.
 
@@ -33,9 +38,10 @@ def get_clean_data(data, max_samples=None):
     Returns:
         data_list: A list of dictionaries containing 'sentence1', 'sentence2', and 'label' keys.
     """
-    s1 = [item['sentence1'].strip() for item in data] # .strip() removes whitespace from a string (e.g, spaces, tabs)
-    s2 = [item['sentence2'].strip() for item in data]
-    labels = [item['gold_label'] for item in data]
+
+    s1 = [item[data_args.sentence1_key].strip() for item in data] # .strip() removes whitespace from a string (e.g, spaces, tabs)
+    s2 = [item[data_args.sentence2_key].strip() for item in data]
+    labels = [item[data_args.label_key] for item in data]
 
     data_list = [{"sentence1": s1[i], "sentence2": s2[i], "label": labels[i]} for i in range(len(s1))]
 
@@ -47,7 +53,7 @@ def get_clean_data(data, max_samples=None):
 
     return data_list
 
-def load_and_clean_data(data_args):
+def load_and_clean_data(logger, data_args):
     """
     Load and clean/preprocess data from specified train, validation, and test files.
 
@@ -61,15 +67,15 @@ def load_and_clean_data(data_args):
         f"Starting to load data from files: {data_args.train_file, data_args.validation_file, data_args.test_file}"
     )
 
-    train_med, eval_med, test_med = load_raw_data(data_args)
+    train_med, eval_med, test_med = load_raw_data()
 
-    train_list = get_clean_data(train_med, data_args.max_train_samples)
+    train_list = get_clean_data(train_med, data_args, data_args.max_train_samples)
     logger.info(f"Loading training data with sample size: {len(train_list)}.")
 
-    eval_list = get_clean_data(eval_med, data_args.max_eval_samples)
+    eval_list = get_clean_data(eval_med, data_args, data_args.max_eval_samples)
     logger.info(f"Loading evaluation data with sample size: {len(eval_list)}.")
 
-    test_list = get_clean_data(test_med, data_args.max_test_samples)
+    test_list = get_clean_data(test_med, data_args, data_args.max_test_samples)
     logger.info(f"Loading testing data with sample size: {len(test_list)}.")
 
     return train_list, eval_list, test_list
@@ -85,7 +91,7 @@ def export_json(data, file_path):
     with open(file_path, "w") as outfile:
         json.dump(data, outfile)
 
-def export_clean_data(train_list, eval_list, test_list):
+def export_clean_data(logger, train_list, eval_list, test_list, os):
     """
     Export cleaned and preprocessed train, validation, and test data to JSON files.
 
@@ -94,9 +100,9 @@ def export_clean_data(train_list, eval_list, test_list):
         eval_list: A list of cleaned and preprocessed evaluation data.
         test_list: A list of cleaned and preprocessed test data.
     """
-    export_json(train_list, "../data/clean/clean_train_med.json")
-    export_json(eval_list, "../data/clean/clean_eval_med.json")
-    export_json(test_list, "../data/clean/clean_test_med.json")
+    export_json(train_list, os.path.join(CLEAN_DATA_DIR, "clean_train_med.json"))
+    export_json(eval_list, os.path.join(CLEAN_DATA_DIR, "clean_eval_med.json"))
+    export_json(test_list, os.path.join(CLEAN_DATA_DIR, "clean_test_med.json"))
 
     logger.info(f"Finished exporting cleaned data as json files.")
 
@@ -110,10 +116,11 @@ def get_data_files(data_args):
     Returns:
         dict: A dictionary containing the file paths for train, validation, and test sets.
     """
+
     data_files = {
-        "train": "../data/clean/" + data_args.train_file,
-        "validation": "../data/clean/" + data_args.validation_file,
-        "test": "../data/clean/" + data_args.test_file,
+        "train": CLEAN_TRAIN_FILE,
+        "validation": CLEAN_VALIDATION_FILE,
+        "test": CLEAN_TEST_FILE,
     }
     return data_files
 

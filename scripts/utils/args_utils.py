@@ -7,7 +7,7 @@ from transformers.training_args import TrainingArguments
 @dataclass
 class DataLoadingArguments:
     """
-    Arguments pertaining to what data we are going to input our model with for training and evaluation.
+    Arguments pertaining to the input data used for training, evaluation, and testing the model.
     """
 
     train_file: Optional[str] = field( # specify path to training data
@@ -43,6 +43,18 @@ class DataLoadingArguments:
             )
         },
     )
+    sentence1_key: Optional[str] = field( # specify the key for the first sentence in the data
+        default="sentence1",
+        metadata={"help": "The key in the json files corresponding to the premise sentence."},
+    )
+    sentence2_key: Optional[str] = field( # specify the key for the second sentence in the data
+        default="sentence2",
+        metadata={"help": "The key in the json files corresponding to the hypothesis sentence."},
+    )
+    label_key: Optional[str] = field( # specify the key for the label in the data
+        default="gold_label",
+        metadata={"help": "The key in the json files corresponding to the label."},
+    )
 
     def __post_init__(self): # does additional checks after defining params
         if self.train_file is None or self.validation_file is None or self.test_file is None:
@@ -56,9 +68,8 @@ class DataLoadingArguments:
 
 @dataclass
 class ModelArguments:
-    # Add your model-related arguments here, e.g.: model_name_or_path: str
     """
-    Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
+    Arguments pertaining to the pre-trained model, configuration, and tokenizer used for fine-tuning.
     """
 
     model_name_or_path: Optional[str] = field( # path to pre-trained model
@@ -100,7 +111,7 @@ class ModelArguments:
 @dataclass
 class MyTrainingArguments(TrainingArguments):
     """
-    My training arguments
+    Custom training arguments that include seed, output directory, hyperparameters, and early stopping configurations.
     """
 
     seed: int = field(
@@ -127,14 +138,60 @@ class MyTrainingArguments(TrainingArguments):
         default = True,
         metadata = {"help": "whether or not to use mps device"}
     )
-
+    learning_rate: float = field(
+        default = 3e-5,
+        metadata = {"help": "the hyperparameter learning rate to use for training, default is 3e-5"}
+    )
+    per_device_train_batch_size: int = field(
+        default = 8,
+        metadata = {"help": "the hyperparameter batch size to use for training, default is 8"}
+    )
+    num_train_epochs: int = field(
+        default = 3,
+        metadata = {"help": "the hyperparameter number of epochs to use for training, default is 3"}
+    )
+    max_seq_length: int = field(
+        default = 128,
+        metadata = {"help": "the hyperparameter max sequence length to use for training, default is 128"}
+    )
+    weight_decay: float = field(
+        default = 1e-2,
+        metadata = {"help": "the hyperparameter weight decay to use for training, default is 1e-2"}
+    )
+    use_optimized_hyperparams: bool = field(
+        default = True,
+        metadata = {
+        "help": "set to False if the optimized_hyperparameters file exists but you don't want to use ANY of the optimized hyperparameters."
+                    "default is True. if True, will use the optimized hyperparameters instead of default values for the hyperparameters that are not user specified."
+                    }
+    )
+    load_best_model_at_end: bool = field(
+        default = True,
+        metadata = {"help": "for early stopping, whether or not to load the best model at the end of training, default is True"}
+    )
+    evaluation_strategy: str = field(
+        default = "steps",
+        metadata = {"help": "for early stopping, the hyperparameter evaluation strategy to use for training, default is 'steps'"}
+    )
+    save_strategy: str = field(
+        default = "steps",
+        metadata = {"help": "for early stopping, the hyperparameter save strategy to use for training, default is 'steps'"}
+    )
+    metric_for_best_model: str = field(
+        default = "eval_loss",
+        metadata = {"help": "for early stopping, the hyperparameter metric to use for training, default is 'eval_loss'"}
+    )
+    num_times_eval_per_epoch: float = field(
+        default = 2.0,
+        metadata = {"help": "for early stopping, the number of times to evaluate (check for overfitting) per epoch to use for training, default is 2.0"}
+    )
 
 def parse_arguments():
     """
-    Parses command line arguments into data classes for data, model, and training.
+    Parses command line arguments and returns data, model, and training argument data classes.
 
     Returns:
-        tuple: A tuple containing data_args, model_args, and training_args.
+        tuple: A tuple containing data_args, model_args, and training_args as data classes.
     """
     parser = HfArgumentParser((DataLoadingArguments, ModelArguments, MyTrainingArguments))
     data_args, model_args, training_args = parser.parse_args_into_dataclasses()

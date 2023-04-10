@@ -1,24 +1,18 @@
-
-import datasets
-import sys
 import logging
 import json
+import os
 import optuna
 
 from transformers import (
-    AutoConfig,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
     Trainer,
-    TrainingArguments
+    EarlyStoppingCallback
 )
-from transformers.trainer_utils import get_last_checkpoint
-from transformers.data.data_collator import DataCollatorWithPadding
-from transformers import EarlyStoppingCallback
 
 from utils.args_utils import *
 from utils.data_preprocessing_utils import *
 from utils.model_utils import *
+
+from config import OPTIMIZED_HYPERPARAMS_DIR
 
 # need to set logger in helper function scripts
 logger = logging.getLogger(__name__)
@@ -80,7 +74,7 @@ def get_hyperparameters(trial, get_search_space, logger):
     
     return learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay
 
-def update_training_args_with_hyperparams_and_early_stopping(logger, training_args, learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay):
+def update_training_args_with_hyperparams(logger, training_args, learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay):
     """
     Sets the training arguments to the suggested hyperparameter values and configures early stopping.
 
@@ -97,13 +91,6 @@ def update_training_args_with_hyperparams_and_early_stopping(logger, training_ar
         MyTrainingArguments: The updated instance of MyTrainingArguments with the suggested hyperparameter values.
     """
     logger.info(f"Setting training_args attributes to suggested values.")
-    
-    # set attributes for early stopping patience
-    setattr(training_args, "load_best_model_at_end", True)
-    setattr(training_args, "evaluation_strategy", "steps")
-    setattr(training_args, "save_strategy", "steps")
-    setattr(training_args, "metric_for_best_model", "eval_loss")
-    setattr(training_args, "eval_steps", 200)
 
     # feed the suggested values into training_args
     setattr(training_args, "learning_rate", learning_rate)
@@ -111,6 +98,24 @@ def update_training_args_with_hyperparams_and_early_stopping(logger, training_ar
     setattr(training_args, "num_train_epochs", num_train_epochs)
     setattr(training_args, "max_seq_length", max_seq_length)
     setattr(training_args, "weight_decay", weight_decay)
+    return training_args
+
+def update_training_args_with_eval_steps(logger, training_args, clean_datasets):
+    """
+    Sets the training arguments to the suggested hyperparameter values and configures early stopping.
+
+    Args:
+        logger (logging.Logger): A logger object for logging messages.
+        training_args (MyTrainingArguments): An instance of MyTrainingArguments containing the training arguments.
+    Returns:
+        MyTrainingArguments: The updated instance of MyTrainingArguments with the suggested hyperparameter values.
+    """
+    logger.info(f"Setting training_args attributes to suggested values.")
+    
+    train_length = len(clean_datasets["train"])
+    setattr(training_args, "eval_steps", int(train_length/training_args.per_device_train_batch_size*(training_args.num_times_eval_per_epoch**-1))) # if num_times_eval_per_epoch = 2, then 2^-1 = 0.5
+    # train_length / training_args.per_device_train_batch_size = number of training steps per epoch
+    # number of training steps per epoch * (training_args.num_times_eval_per_epoch**-1) = number of training steps between evaluations
     return training_args
 
 def train_and_evaluate(trial, data_args, model_args, training_args, logger, last_checkpoint, clean_datasets):
@@ -134,7 +139,7 @@ def train_and_evaluate(trial, data_args, model_args, training_args, logger, last
     learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay = get_hyperparameters(trial, get_search_space, logger)
     
     # update training arguments with the trial hyperparameters
-    training_args = update_training_args_with_hyperparams_and_early_stopping(logger, training_args, learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay)
+    training_args = update_training_args_with_hyperparams(logger, training_args, learning_rate, per_device_train_batch_size, num_train_epochs, max_seq_length, weight_decay)
 
     # get label information from the dataset
     label_list, num_labels = get_label_information(logger, clean_datasets)
@@ -150,6 +155,9 @@ def train_and_evaluate(trial, data_args, model_args, training_args, logger, last
     
     # preprocess datasets by tokenizing and truncating
     clean_datasets = preprocess_datasets(logger, clean_datasets, training_args, max_seq_length, sentence1_key, sentence2_key, label_to_id, tokenizer)
+
+    # update training arguments with early stopping
+    training_args = update_training_args_with_eval_steps(logger, training_args, clean_datasets)
     
     # get train and eval subsets
     short_train, short_eval = get_subsets(logger, clean_datasets, data_args, training_args)
@@ -236,7 +244,7 @@ def optimize_hyperparameters(study, data_args, model_args, training_args, logger
                    n_trials=training_args.n_trials)
     return study
 
-def save_optimized_hyperparams(logger, study, output_path):
+def save_optimized_hyperparams(logger, study):
     """
     Saves the optimized hyperparameters as a JSON file.
 
@@ -251,63 +259,79 @@ def save_optimized_hyperparams(logger, study, output_path):
         'best_hyperparameters': study.best_params,
         'best_accuracy': study.best_value
     }
+    output_path = os.path.join(OPTIMIZED_HYPERPARAMS_DIR, 'optimized_hyperparameters.json')
+
     with open(output_path, 'w') as f:
         json.dump(optimized_hyperparams, f)
 
-def load_optimized_hyperparameters(filepath, logger):
+def load_optimized_hyperparameters(logger):
     """
-    Load optimized hyperparameters from a JSON file.
+    Load optimized hyperparameters from a JSON file if the file exists in the given folder.
+    If the file or folder is not found, a warning is logged, and the function returns None.
 
     Args:
-        filepath (str): Path to the JSON file containing optimized hyperparameters.
+        logger: Logger instance for logging information and warnings.
 
     Returns:
-        dict: A dictionary containing the optimized hyperparameters.
+        dict: A dictionary containing the optimized hyperparameters or None if the file or folder is not found.
     """
-    logger.info(f"Loading optimized hyperparameters from {filepath}...")
+    filepath = OPTIMIZED_HYPERPARAMS_DIR + "optimized_hyperparameters.json"
 
-    with open(filepath, "r") as f:
-        optimized_hyperparameters = json.load(f)
+    if not os.path.exists(filepath):
+        logger.warning(f"No optimized hyperparameters file found at {filepath}. File path does not exist.")
+        logger.info(f"Using specified and default hyperparameters instead.")
+        return None
+
+    folder_path, _ = os.path.split(filepath)
+    if not os.listdir(folder_path):
+        logger.warning(f"No files found in the folder: {folder_path}. Files do not exist.")
+        logger.info(f"Using specified and default hyperparameters instead.")
+        return None
+    
+    else:
+        logger.info(f"Loading optimized hyperparameters from {filepath}...")
+
+        with open(filepath, "r") as f:
+            optimized_hyperparameters = json.load(f)
     return optimized_hyperparameters
 
 def set_optimized_hyperparameters(logger, training_args, optimized_hyperparameters):
     """
-    Set the optimized hyperparameters to the training arguments.
+    Set the optimized hyperparameters to the training arguments, unless the user has specified a different value.
+    If optimized_hyperparameters is None, the function uses specified and default hyperparameters.
 
     Args:
+        logger: Logger instance for logging information and warnings.
         training_args (TrainingArguments): The training arguments containing training-related configurations.
-        optimized_hyperparameters (dict): A dictionary containing the optimized hyperparameters.
+        optimized_hyperparameters (dict): A dictionary containing the optimized hyperparameters or None.
 
     Returns:
-        TrainingArguments: The updated training arguments with optimized hyperparameters.
+        TrainingArguments: The updated training arguments with optimized hyperparameters or user-specified/default values.
     """
-    logger.info(f"Setting training_args attributes to optimized hyperparameter values...")
 
-    for k, v in optimized_hyperparameters.items():
-        if k == "best_hyperparameters":
-            for k2, v2 in v.items():
-                setattr(training_args, k2, v2)
-    return training_args
+    if optimized_hyperparameters is None:
+        logger.info(f"Using specified and default hyperparameters instead.")
+        return training_args
 
-def update_training_args_with_early_stopping(logger, training_args, clean_datasets):
-    """
-    Sets the training arguments to the suggested hyperparameter values and configures early stopping.
+    else:
+        logger.info(f"Setting training_args attributes to optimized hyperparameter values...")
 
-    Args:
-        logger (logging.Logger): A logger object for logging messages.
-        training_args (MyTrainingArguments): An instance of MyTrainingArguments containing the training arguments.
-    Returns:
-        MyTrainingArguments: The updated instance of MyTrainingArguments with the suggested hyperparameter values.
-    """
-    logger.info(f"Setting training_args attributes to suggested values.")
-    
-    # set attributes for early stopping patience
-    setattr(training_args, "load_best_model_at_end", True)
-    setattr(training_args, "evaluation_strategy", "steps")
-    setattr(training_args, "save_strategy", "steps")
-    setattr(training_args, "metric_for_best_model", "eval_loss")
-    train_length = len(clean_datasets["train"])
-    setattr(training_args, "eval_steps", int(train_length/training_args.per_device_train_batch_size*0.55)) # total steps per epoch * 0.55 will let you evaluate the model 1 or 2 times per epoch
+        default_hyperparameters = {
+            "learning_rate": 3e-5,
+            "per_device_train_batch_size": 8,
+            "num_train_epochs": 3,
+            "max_seq_length": 128,
+            "weight_decay": 1e-2
+        }
 
-    return training_args
-
+        for k, v in optimized_hyperparameters.items():
+            if k == "best_hyperparameters":
+                for k2, v2 in v.items():
+                    # check if the user changed the hyperparam to not the default value
+                    if getattr(training_args, k2) == default_hyperparameters[k2] and training_args.use_optimized_hyperparams: # use_optimized_hyperparams is default True, if False, ignores all optimized hyperparameters and uses default/specified values
+                        # if the user did not change the hyperparam, then set it to the optimized value
+                        setattr(training_args, k2, v2)
+                    else:
+                        # use the specified value
+                        logger.info(f"Using specified value for {k2}: {getattr(training_args, k2)}")
+        return training_args

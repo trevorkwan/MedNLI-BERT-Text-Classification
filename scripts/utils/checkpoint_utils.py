@@ -2,6 +2,8 @@ import os
 import logging
 from transformers.trainer_utils import get_last_checkpoint # returns the path to the last saved checkpoint file during training (useful if training is interrupted)
 
+# need to set logger in helper function scripts
+logger = logging.getLogger(__name__)
 
 def detect_last_checkpoint(training_args):
     """

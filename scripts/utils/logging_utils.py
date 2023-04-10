@@ -11,8 +11,8 @@ def set_logger_and_verbosity(logger=None):
     Args:
         training_args: A MyTrainingArguments object containing the training arguments for the script.
     """
-    if logger is None:
-        logger = logging.getLogger(__name__) # creates a logger object with the "name" get_best_model, to identify where these logger messages are coming from
+    # if logger is None:
+    #     logger = logging.getLogger(__name__) # creates a logger object with the "name" get_best_model, to identify where these logger messages are coming from
     
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s", # log format
@@ -21,6 +21,8 @@ def set_logger_and_verbosity(logger=None):
     )
     
     logger.setLevel(logging.INFO) # set the logging level for the logger object for the entire script
+
+    return logger
 
 def setup_logging(logger = None, training_args = None):
     """

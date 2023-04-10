@@ -4,6 +4,8 @@ from typing import List, Tuple
 import datasets
 from transformers import PretrainedConfig, PreTrainedTokenizer
 
+# need to set logger in helper function scripts
+logger = logging.getLogger(__name__)
 
 def get_train_subsets(clean_datasets, data_args, training_args):
     """

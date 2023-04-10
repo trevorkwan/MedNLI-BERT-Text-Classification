@@ -3,7 +3,6 @@ import os
 
 import numpy as np
 
-from datasets import load_dataset
 from transformers import (
     AutoConfig,
     AutoModelForSequenceClassification,
@@ -15,6 +14,10 @@ from transformers import (
     default_data_collator,
 )
 
+from config import FINE_TUNED_MODEL_DIR
+
+# need to set logger in helper function scripts
+logger = logging.getLogger(__name__)
 
 def load_config_tokenizer_model(logger, model_args, num_labels):
     """
@@ -158,7 +161,7 @@ def save_trainer_state(logger, best_trainer, metrics):
     best_trainer.save_metrics("train", metrics)
     best_trainer.save_state()
 
-def get_fine_tuned_model_path(model_args, path):
+def get_fine_tuned_model_path(model_args):
     """
     Set the path for the model.
 
@@ -169,6 +172,7 @@ def get_fine_tuned_model_path(model_args, path):
     Returns:
         None
     """
+    path = FINE_TUNED_MODEL_DIR
     setattr(model_args, "model_name_or_path", path)
 
 def set_evaluation_metric(training_args, metric_name="eval_accuracy"):
@@ -180,7 +184,7 @@ def set_evaluation_metric(training_args, metric_name="eval_accuracy"):
         metric_name (str): The name of the metric to use for early stopping, default is "eval_accuracy".
     """
     training_args.metric_for_best_model = metric_name
-    
+
 def evaluate_test_dataset(logger, trainer, test_dataset):
     """
     Evaluates the model on the test dataset.
@@ -194,7 +198,7 @@ def evaluate_test_dataset(logger, trainer, test_dataset):
     """
     logger.info("*** Testing Full Dataset ***")
 
-    metrics = trainer.evaluate(eval_dataset=test_dataset)
+    metrics = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix="test")
     metrics["test_samples"] = len(test_dataset)
     return metrics
 
@@ -209,7 +213,7 @@ def log_and_save_test_metrics(logger, trainer, metrics):
     logger.info(f"Saving evaluation metrics on test dataset...")
 
     trainer.log_metrics("test", metrics)
-    trainer.save_metrics("test", metrics)
+    trainer.save_metrics("test", metrics, combined = False)
 
 def predict_on_test_dataset(logger, trainer, predict_dataset, label_list, output_dir):
     """
