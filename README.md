@@ -54,7 +54,7 @@ train:
 
 After making any changes to the Makefile, simply re-run the corresponding target using the make <target_name> command.
 
-### Troubleshooting
+## Troubleshooting
 If you encounter any issues or errors during the execution of the Makefile, try the following:
 
 1. Ensure that you have installed all the required packages.
