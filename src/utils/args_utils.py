@@ -73,6 +73,7 @@ class ModelArguments:
     """
 
     model_name_or_path: Optional[str] = field( # path to pre-trained model
+        default = None,
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     config_name: Optional[str] = field( # path/name to config of model if not the same as model_name

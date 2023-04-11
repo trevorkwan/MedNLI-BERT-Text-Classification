@@ -14,6 +14,8 @@ from utils.data_preprocessing_utils import *
 from utils.hyperparam_utils import *
 from utils.model_utils import *
 
+from config import OPTIMIZED_HYPERPARAMS_DIR
+
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.27.0.dev0")
 

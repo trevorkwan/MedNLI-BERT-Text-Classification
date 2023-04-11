@@ -5,9 +5,6 @@ from transformers import (
 )
 from transformers.utils import check_min_version # checks if transformers package meets minimum version requirements
 
-# Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.27.0.dev0")
-
 from utils.args_utils import *
 from utils.logging_utils import *
 from utils.checkpoint_utils import *
@@ -16,6 +13,9 @@ from utils.data_preprocessing_utils import *
 from utils.hyperparam_utils import *
 from utils.model_utils import *
 
+# Will error if the minimal version of Transformers is not installed. Remove at your own risks.
+check_min_version("4.27.0.dev0")
+
 def main():
 
     # Parse arguments
@@ -23,6 +23,9 @@ def main():
 
     # Get fine-tuned model path
     get_fine_tuned_model_path(model_args)
+
+    # Set evaluation metric
+    set_evaluation_metric(training_args, metric_name="eval_accuracy")
 
     # Setup logging
     logger = logging.getLogger(__name__) # creates a logger object with the "name" get_best_model, to identify where these logger messages are coming from
@@ -55,17 +58,11 @@ def main():
     # Get max_seq_length
     max_seq_length = get_max_seq_length(training_args.max_seq_length, tokenizer, logger)
 
-    # Get non_label_column_names
-    non_label_column_names = get_non_label_column_names(logger, clean_datasets)
-
-    # Get sentence1_key, sentence2_key
-    sentence1_key, sentence2_key = get_sentence_keys(logger, non_label_column_names)
-
     # Get label_to_id
     label_to_id = get_label_to_id(logger, config, num_labels, label_list)
 
     # Preprocess clean datasets
-    sentence1_key, sentence2_key, label_to_id = preprocess_clean_datasets(logger, clean_datasets, config, num_labels, label_list)
+    sentence1_key, sentence2_key, label_to_id = preprocess_clean_datasets(logger, config, num_labels, label_list, data_args)
     
     # Preprocess datasets by tokenizing and truncating
     clean_datasets = preprocess_datasets(logger, clean_datasets, training_args, max_seq_length, sentence1_key, sentence2_key, label_to_id, tokenizer)
@@ -93,11 +90,14 @@ def main():
         data_collator=data_collator
     )
 
-    # Get the predict dataset
-    predict_dataset = clean_datasets["test"]
+    # Get the test dataset
+    test_dataset = clean_datasets["test"]
 
-    # Predict on the test dataset and save the results to a file
-    predict_on_test_dataset(logger, best_trainer, predict_dataset, label_list, training_args.output_dir)
+    # Evaluate the model on the test dataset
+    test_metrics = evaluate_test_dataset(logger, best_trainer, test_dataset)
+
+    # Log and save the test metrics
+    log_and_save_test_metrics(logger, best_trainer, test_metrics)
 
 if __name__ == "__main__": # if the script is run from the command line, sets __name__ to "__main__" and main() will be executed. if the script is imported into another script, `__name__` will be set to `get_best_model` and main() will not be executed
     main()

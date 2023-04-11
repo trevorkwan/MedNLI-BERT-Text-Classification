@@ -151,7 +151,7 @@ def train_and_evaluate(trial, data_args, model_args, training_args, logger, last
     max_seq_length = get_max_seq_length(max_seq_length, tokenizer, logger)
 
     # preprocess datasets to get sentence1_key, sentence2_key, and label_to_id
-    sentence1_key, sentence2_key, label_to_id = preprocess_clean_datasets(logger, clean_datasets, config, num_labels, label_list)
+    sentence1_key, sentence2_key, label_to_id = preprocess_clean_datasets(logger, config, num_labels, label_list, data_args)
     
     # preprocess datasets by tokenizing and truncating
     clean_datasets = preprocess_datasets(logger, clean_datasets, training_args, max_seq_length, sentence1_key, sentence2_key, label_to_id, tokenizer)
@@ -297,8 +297,9 @@ def load_optimized_hyperparameters(logger):
 
 def set_optimized_hyperparameters(logger, training_args, optimized_hyperparameters):
     """
-    Set the optimized hyperparameters to the training arguments, unless the user has specified a different value.
-    If optimized_hyperparameters is None, the function uses specified and default hyperparameters.
+    Update the training arguments with optimized hyperparameters or user-specified/default values.
+    If optimized_hyperparameters is None or training_args.use_optimized_hyperparams is set to False,
+    the function will use specified and default hyperparameters.
 
     Args:
         logger: Logger instance for logging information and warnings.
@@ -316,19 +317,10 @@ def set_optimized_hyperparameters(logger, training_args, optimized_hyperparamete
     else:
         logger.info(f"Setting training_args attributes to optimized hyperparameter values...")
 
-        default_hyperparameters = {
-            "learning_rate": 3e-5,
-            "per_device_train_batch_size": 8,
-            "num_train_epochs": 3,
-            "max_seq_length": 128,
-            "weight_decay": 1e-2
-        }
-
         for k, v in optimized_hyperparameters.items():
             if k == "best_hyperparameters":
                 for k2, v2 in v.items():
-                    # check if the user changed the hyperparam to not the default value
-                    if getattr(training_args, k2) == default_hyperparameters[k2] and training_args.use_optimized_hyperparams: # use_optimized_hyperparams is default True, if False, ignores all optimized hyperparameters and uses default/specified values
+                    if training_args.use_optimized_hyperparams: # use_optimized_hyperparams is default True, if False, ignores all optimized hyperparameters and uses default/specified values
                         # if the user did not change the hyperparam, then set it to the optimized value
                         setattr(training_args, k2, v2)
                     else:

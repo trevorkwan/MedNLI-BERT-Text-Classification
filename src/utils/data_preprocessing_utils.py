@@ -4,8 +4,12 @@ from typing import List, Tuple
 import datasets
 from transformers import PretrainedConfig, PreTrainedTokenizer
 
+from utils.args_utils import *
+
 # need to set logger in helper function scripts
 logger = logging.getLogger(__name__)
+
+data_args, model_args, training_args = parse_arguments()
 
 def get_train_subsets(clean_datasets, data_args, training_args):
     """
@@ -103,44 +107,6 @@ def get_max_seq_length(max_seq_length, tokenizer, logger):
         )
         max_seq_length = min(max_seq_length, tokenizer.model_max_length) # ...and sets the max_seq_length to the max allowed length for tokenizer
     return max_seq_length 
- 
-def get_non_label_column_names(logger, clean_datasets):
-    """
-    Gets the column names in the dataset that are not 'label'.
-
-    Args:
-        logger (logging.Logger): A logger object for logging messages.
-        clean_datasets (datasets.DatasetDict): A dictionary containing the clean datasets for train, validation, and test sets.
-
-    Returns:
-        list: A list of column names that are not 'label'.
-    """
-    logger.info(f"Getting non_label_column_names...")
-
-    non_label_column_names = [name for name in clean_datasets["train"].column_names if name != "label"]
-    return non_label_column_names
-
-def get_sentence_keys(logger, non_label_column_names):
-    """
-    Gets the sentence1_key and sentence2_key based on the non_label_column_names.
-
-    Args:
-        logger (logging.Logger): A logger object for logging messages.
-        non_label_column_names (list): A list of column names that are not 'label'.
-
-    Returns:
-        tuple: A tuple containing the sentence1_key and sentence2_key.
-    """
-    logger.info(f"Getting sentence1_key, sentence2_key...")
-
-    if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names:
-        sentence1_key, sentence2_key = "sentence1", "sentence2"
-    else:
-        if len(non_label_column_names) >= 2:
-            sentence1_key, sentence2_key = non_label_column_names[:2]
-        else:
-            sentence1_key, sentence2_key = non_label_column_names[0], None
-    return sentence1_key, sentence2_key
 
 def get_label_to_id(logger, config, num_labels, label_list):
     """
@@ -173,24 +139,23 @@ def get_label_to_id(logger, config, num_labels, label_list):
     label_to_id = {v: i for i, v in enumerate(label_list)}
     return label_to_id
 
-def preprocess_clean_datasets(logger, clean_datasets, config, num_labels, label_list):
+def preprocess_clean_datasets(logger, config, num_labels, label_list, data_args):
     """
     Preprocesses the clean datasets and gets the sentence keys and label_to_id mapping.
 
     Args:
         logger (logging.Logger): A logger object for logging messages.
-        clean_datasets (datasets.DatasetDict): A dictionary containing the clean datasets for train, validation, and test sets.
         config (PretrainedConfig): The pre-trained model configuration.
         num_labels (int): The number of unique labels in the dataset.
         label_list (list): A list of unique labels.
+        data_args (DataArguments): An instance of DataArguments containing the data arguments.
 
     Returns:
         tuple: A tuple containing the sentence1_key, sentence2_key, and label_to_id mapping.
     """
     logger.info(f"Preprocessing clean datasets...")
 
-    non_label_column_names = get_non_label_column_names(logger, clean_datasets)
-    sentence1_key, sentence2_key = get_sentence_keys(logger, non_label_column_names)
+    sentence1_key, sentence2_key = data_args.sentence1_key, data_args.sentence2_key
     label_to_id = get_label_to_id(logger, config, num_labels, label_list)
     return sentence1_key, sentence2_key, label_to_id
 
