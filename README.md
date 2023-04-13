@@ -4,7 +4,7 @@ This repository contains the code for training and evaluating a text classificat
 
 ## Prerequisites
 
-- Python 3.6 or later
+- Python 3.9.16 or later
 - Install the required packages by running:
 
 ```bash
@@ -40,8 +40,8 @@ For example, to run the train target, use the command:
 make train
 ```
 
-### Customizing the Makefile
-You can customize the Makefile by modifying the parameters passed to each script. For example, you can change the learning rate for the train target by updating the --learning_rate parameter in the Makefile:
+### Modifying the Parameters
+You can modify the parameters passed to each script by customizing the Makefile. For example, you can change the learning rate for the train target by updating the --learning_rate parameter in the Makefile:
 
 ```make
 train: 
