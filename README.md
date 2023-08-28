@@ -1,4 +1,4 @@
-# MedNLI Text Classification Project
+# MedNLI BERT Text Classification Project
 
 This repository contains the code for training and evaluating a text classification model using the MedNLI dataset. The model is trained using the BERT architecture and fine-tuned on the specific dataset. The project utilizes a Makefile to simplify the execution of various tasks such as data cleaning, hyperparameter optimization, training, evaluation, and prediction.
 
